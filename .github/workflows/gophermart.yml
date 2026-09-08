@@ -3,10 +3,9 @@ name: gophermart
 on:
   workflow_dispatch:
   pull_request:
+    types: [opened, synchronize]
   push:
-    branches:
-      - main
-      - master
+    branches: [master]
 
 jobs:
 
