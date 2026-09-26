@@ -300,10 +300,10 @@ func (rt *Router) listOrders(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	type orderItem struct {
-		Number     string          `json:"number"`
-		Status     string          `json:"status"`
+		Number     string           `json:"number"`
+		Status     string           `json:"status"`
 		Accrual    *decimal.Decimal `json:"accrual,omitempty"`
-		UploadedAt time.Time       `json:"uploaded_at"`
+		UploadedAt time.Time        `json:"uploaded_at"`
 	}
 
 	items := make([]orderItem, 0, len(orders))

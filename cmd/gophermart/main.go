@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -150,6 +149,3 @@ func listenAndServe(server *http.Server) {
 		logger.Log.Error("ошибка HTTP-сервера", zap.Error(err))
 	}
 }
-
-// _ подавляет неиспользуемые импорты
-var _ = strconv.Itoa

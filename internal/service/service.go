@@ -34,12 +34,12 @@ type ServiceConfig struct {
 func DefaultServiceConfig() ServiceConfig {
 	return ServiceConfig{
 		BcryptCost:           12,
-		AccrualQueueBuffer:    1000,
-		DBUpdateQueueBuffer:   2000,
-		DBUpdateBatchSize:     1000,
-		DBUpdateFlushTimeout:  100 * time.Millisecond,
-		AccrualPollInterval:   250 * time.Millisecond,
-		AccrualRetryDelay:     3 * time.Second,
+		AccrualQueueBuffer:   1000,
+		DBUpdateQueueBuffer:  2000,
+		DBUpdateBatchSize:    1000,
+		DBUpdateFlushTimeout: 100 * time.Millisecond,
+		AccrualPollInterval:  250 * time.Millisecond,
+		AccrualRetryDelay:    3 * time.Second,
 	}
 }
 
@@ -47,9 +47,9 @@ func DefaultServiceConfig() ServiceConfig {
 // Содержит бизнес-логику регистрации, аутентификации, приёма заказов
 // и асинхронной обработки начислений баллов.
 type GopherMart struct {
-	config         ServiceConfig
-	accrualQueue   chan string         // канал номеров заказов для опроса accrual
-	dbUpdateQueue  chan repository.OrderUpdate // канал обновлений статусов для записи в БД
+	config        ServiceConfig
+	accrualQueue  chan string                 // канал номеров заказов для опроса accrual
+	dbUpdateQueue chan repository.OrderUpdate // канал обновлений статусов для записи в БД
 }
 
 // NewGopherMart создаёт экземпляр сервиса на основе конфигурации.
@@ -189,18 +189,19 @@ func (s *GopherMart) StartAccrualProcessor(ctx context.Context) {
 }
 
 // StopAccrualProcessor закрывает канал accrualQueue, что приводит
-/// к завершению accrual worker'а и последующей остановке batch processor'а.
+// / к завершению accrual worker'а и последующей остановке batch processor'а.
 func (s *GopherMart) StopAccrualProcessor() {
 	close(s.accrualQueue)
 }
 
 // runAccrualWorker читает номера заказов из accrualQueue и опрашивает
 // accrual-систему. Для каждого заказа:
-// - при получении финального статуса (INVALID, PROCESSED) — отправляет
-//   обновление в dbUpdateQueue;
-// - при нефинальном статусе (REGISTERED, PROCESSING) или коде 204 —
-//   повторно ставит заказ в очередь через AccrualRetryDelay;
-// - при коде 429 — ждёт Retry-After и повторяет.
+//   - при получении финального статуса (INVALID, PROCESSED) — отправляет
+//     обновление в dbUpdateQueue;
+//   - при нефинальном статусе (REGISTERED, PROCESSING) или коде 204 —
+//     повторно ставит заказ в очередь через AccrualRetryDelay;
+//   - при коде 429 — ждёт Retry-After и повторяет.
+//
 // Между запросами выдерживается AccrualPollInterval.
 func (s *GopherMart) runAccrualWorker(ctx context.Context) {
 	for {

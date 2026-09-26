@@ -15,7 +15,7 @@ type ApplicationConfig struct {
 	SigningKey           []byte        // ключ подписи JWT-токенов
 	CookieAuthName       string        // имя cookie для хранения JWT-токена аутентификации
 	CookieAuthTTL        time.Duration // время жизни cookie аутентификации
-	ShutdownTimeout     time.Duration // таймаут graceful shutdown
+	ShutdownTimeout      time.Duration // таймаут graceful shutdown
 }
 
 // LoadApplicationConfig загружает конфигурацию из флагов командной строки

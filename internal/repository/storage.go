@@ -20,17 +20,17 @@ type User struct {
 
 // Order представляет запись заказа в базе данных.
 type Order struct {
-	Number     string         // номер заказа
-	Status     string         // внутренний статус: NEW, PROCESSING, INVALID, PROCESSED
+	Number     string          // номер заказа
+	Status     string          // внутренний статус: NEW, PROCESSING, INVALID, PROCESSED
 	Accrual    decimal.Decimal // начисленные баллы (для PROCESSED)
-	UploadedAt time.Time      // время загрузки заказа в систему
+	UploadedAt time.Time       // время загрузки заказа в систему
 }
 
 // Withdrawal представляет запись о списании баллов.
 type Withdrawal struct {
-	OrderNumber string         // номер заказа, в счёт которого списаны баллы
+	OrderNumber string          // номер заказа, в счёт которого списаны баллы
 	Sum         decimal.Decimal // сумма списания
-	ProcessedAt time.Time      // время списания
+	ProcessedAt time.Time       // время списания
 }
 
 // OrderUpdate содержит данные для пакетного обновления статуса заказа
