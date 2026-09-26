@@ -76,7 +76,7 @@ type Storage interface {
 	WithdrawPoints(ctx context.Context, userID int64, orderNo string, sum decimal.Decimal) error
 
 	// ListWithdrawals возвращает все списания пользователя, отсортированные
-	// от самых новых к самым старых по времени списания.
+	// от самых новых к самым старым по времени списания.
 	ListWithdrawals(ctx context.Context, userID int64) ([]Withdrawal, error)
 
 	// ListPendingOrderNumbers возвращает номера всех заказов в статусах
@@ -160,18 +160,4 @@ func NewErrInsufficientFunds() error {
 
 func (e *ErrInsufficientFunds) Error() string {
 	return "недостаточно баллов на счёте"
-}
-
-// ErrOrderOwnedByAnother означает, что заказ загружен другим пользователем.
-type ErrOrderOwnedByAnother struct {
-	Number string
-}
-
-// NewErrOrderOwnedByAnother конструирует ошибку ErrOrderOwnedByAnother.
-func NewErrOrderOwnedByAnother(number string) error {
-	return &ErrOrderOwnedByAnother{Number: number}
-}
-
-func (e *ErrOrderOwnedByAnother) Error() string {
-	return fmt.Sprintf("заказ %s загружен другим пользователем", e.Number)
 }

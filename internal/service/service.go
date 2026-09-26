@@ -46,10 +46,17 @@ func DefaultServiceConfig() ServiceConfig {
 // GopherMart — основной тип сервисного слоя.
 // Содержит бизнес-логику регистрации, аутентификации, приёма заказов
 // и асинхронной обработки начислений баллов.
+//
+// Поле closed — это сигнальный канал, закрытие которого означает,
+// что сервис останавливается. Все горутины, отправляющие данные
+// в accrualQueue, должны проверять closed перед отправкой,
+// чтобы избежать panic при записи в закрытый канал.
 type GopherMart struct {
 	config        ServiceConfig
 	accrualQueue  chan string                 // канал номеров заказов для опроса accrual
 	dbUpdateQueue chan repository.OrderUpdate // канал обновлений статусов для записи в БД
+	closed        chan struct{}               // сигнальный канал: закрыт при остановке сервиса
+	closeOnce     sync.Once                   // гарантирует однократное закрытие accrualQueue и closed
 }
 
 // NewGopherMart создаёт экземпляр сервиса на основе конфигурации.
@@ -63,6 +70,7 @@ func NewGopherMart(cfg ServiceConfig) (*GopherMart, error) {
 		config:        cfg,
 		accrualQueue:  make(chan string, cfg.AccrualQueueBuffer),
 		dbUpdateQueue: make(chan repository.OrderUpdate, cfg.DBUpdateQueueBuffer),
+		closed:        make(chan struct{}),
 	}, nil
 }
 
@@ -114,7 +122,13 @@ func (s *GopherMart) AuthenticateUser(ctx context.Context, login, password strin
 func (s *GopherMart) UploadOrder(ctx context.Context, orderNumber string, userID int64) error {
 	err := s.config.Storage.CreateOrder(ctx, orderNumber, userID)
 	if err != nil {
-		return err
+		// Транслируем ошибку хранилища в ошибку сервисного слоя,
+		// чтобы хендлеру не приходилось импортировать пакет repository.
+		var eoae *repository.ErrOrderAlreadyExists
+		if errors.As(err, &eoae) {
+			return ErrOrderAlreadyExists
+		}
+		return fmt.Errorf("ошибка создания заказа: %w", err)
 	}
 
 	s.enqueueOrder(orderNumber)
@@ -129,7 +143,16 @@ func (s *GopherMart) UploadOrder(ctx context.Context, orderNumber string, userID
 func (s *GopherMart) WithdrawPoints(ctx context.Context, userID int64, orderNo string, sum decimal.Decimal) error {
 	err := s.config.Storage.WithdrawPoints(ctx, userID, orderNo, sum)
 	if err != nil {
-		return err
+		// Транслируем ошибки хранилища в ошибки сервисного слоя.
+		var eif *repository.ErrInsufficientFunds
+		if errors.As(err, &eif) {
+			return ErrInsufficientFunds
+		}
+		var eoae *repository.ErrOrderAlreadyExists
+		if errors.As(err, &eoae) {
+			return ErrOrderAlreadyExists
+		}
+		return fmt.Errorf("ошибка списания баллов: %w", err)
 	}
 
 	s.enqueueOrder(orderNo)
@@ -173,22 +196,26 @@ func (s *GopherMart) EnqueuePendingOrders(ctx context.Context) error {
 		s.enqueueOrder(n)
 	}
 
-	logger.Log.Info("pending orders enqueued for accrual processing",
-		zap.Int("count", len(numbers)))
+	logger.Log.Info("незавершённые заказы поставлены в очередь",
+		zap.Int("количество", len(numbers)))
 
 	return nil
 }
 
 // enqueueOrder ставит номер заказа в очередь на опрос accrual-системы.
-// Если очередь переполнена, логирует предупреждение — заказ останется
-// в БД со статусом NEW и будет обработан при рестарте.
+// Проверяет сигнальный канал closed: если сервис останавливается,
+// отправка отменяется. Если очередь переполнена, логирует
+// предупреждение — заказ останется в БД со статусом NEW
+// и будет обработан при рестарте.
 func (s *GopherMart) enqueueOrder(orderNumber string) {
 	select {
+	case <-s.closed:
+		// сервис останавливается — не отправляем
 	case s.accrualQueue <- orderNumber:
 		// успешно
 	default:
-		logger.Log.Warn("accrual queue full, order will be processed on restart",
-			zap.String("order", orderNumber))
+		logger.Log.Warn("очередь accrual переполнена, заказ будет обработан при рестарте",
+			zap.String("заказ", orderNumber))
 	}
 }
 
@@ -214,10 +241,16 @@ func (s *GopherMart) StartAccrualProcessor(ctx context.Context) {
 	wg.Wait()
 }
 
-// StopAccrualProcessor закрывает канал accrualQueue, что приводит
-// к завершению accrual worker'а и последующей остановке batch processor'а.
+// StopAccrualProcessor инициирует остановку accrual-обработчика.
+// Использует sync.Once для гарантии однократного закрытия:
+// сначала закрывает сигнальный канал closed (запрещает новые отправки
+// в accrualQueue), затем закрывает сам канал accrualQueue
+// (приводит к завершению accrual worker и последующей остановке batch processor).
 func (s *GopherMart) StopAccrualProcessor() {
-	close(s.accrualQueue)
+	s.closeOnce.Do(func() {
+		close(s.closed)
+		close(s.accrualQueue)
+	})
 }
 
 // runAccrualWorker читает номера заказов из accrualQueue и опрашивает
@@ -262,9 +295,9 @@ func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string) {
 	if err != nil {
 		var etmr *accrual.ErrTooManyRequests
 		if errors.As(err, &etmr) {
-			logger.Log.Info("accrual rate limited",
-				zap.String("order", orderNumber),
-				zap.Int("retry_after", etmr.RetryAfter))
+			logger.Log.Info("превышен лимит запросов к accrual-системе",
+				zap.String("заказ", orderNumber),
+				zap.Int("повтор_через_сек", etmr.RetryAfter))
 			// Ждём Retry-After и повторяем
 			select {
 			case <-time.After(time.Duration(etmr.RetryAfter) * time.Second):
@@ -277,14 +310,14 @@ func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string) {
 
 		var enr *accrual.ErrNotRegistered
 		if errors.As(err, &enr) {
-			logger.Log.Debug("order not registered in accrual",
-				zap.String("order", orderNumber))
+			logger.Log.Debug("заказ не зарегистрирован в accrual-системе",
+				zap.String("заказ", orderNumber))
 			s.requeueOrder(ctx, orderNumber)
 			return
 		}
 
-		logger.Log.Error("accrual request failed",
-			zap.String("order", orderNumber),
+		logger.Log.Error("ошибка запроса к accrual-системе",
+			zap.String("заказ", orderNumber),
 			zap.Error(err))
 		s.requeueOrder(ctx, orderNumber)
 		return
@@ -313,8 +346,8 @@ func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string) {
 	select {
 	case s.dbUpdateQueue <- update:
 	default:
-		logger.Log.Warn("db update queue full, update dropped",
-			zap.String("order", orderNumber))
+		logger.Log.Warn("очередь обновлений БД переполнена, обновление потеряно",
+			zap.String("заказ", orderNumber))
 	}
 
 	// Если статус нефинальный — переотправляем в accrual-очередь
@@ -325,11 +358,17 @@ func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string) {
 
 // requeueOrder повторно ставит заказ в очередь accrual после задержки AccrualRetryDelay.
 // Запускает переотправку в отдельной горутине, чтобы не блокировать worker.
+// Проверяет сигнальный канал closed, чтобы избежать panic
+// при записи в закрытый accrualQueue во время остановки сервиса.
 func (s *GopherMart) requeueOrder(ctx context.Context, orderNumber string) {
 	go func() {
 		select {
 		case <-time.After(s.config.AccrualRetryDelay):
+			// Проверяем, не остановлен ли сервис, перед отправкой.
+			// Это предотвращает panic: send on closed channel.
 			s.enqueueOrder(orderNumber)
+		case <-s.closed:
+			// сервис останавливается — не отправляем
 		case <-ctx.Done():
 			return
 		}
@@ -346,6 +385,8 @@ func (s *GopherMart) runBatchProcessor(ctx context.Context) {
 
 	var storageWg sync.WaitGroup
 
+	// flush сбрасывает накопленный батч в БД в отдельной горутине.
+	// Копирует батч, чтобы не блокировать накопление следующих элементов.
 	flush := func() {
 		if len(batch) == 0 {
 			return
@@ -358,7 +399,7 @@ func (s *GopherMart) runBatchProcessor(ctx context.Context) {
 		go func(b []repository.OrderUpdate) {
 			defer storageWg.Done()
 			if err := s.config.Storage.BatchUpdateOrders(ctx, b); err != nil {
-				logger.Log.Error("batch update orders failed", zap.Error(err))
+				logger.Log.Error("ошибка пакетного обновления заказов", zap.Error(err))
 			}
 		}(batchToStore)
 	}

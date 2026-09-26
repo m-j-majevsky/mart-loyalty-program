@@ -2,10 +2,12 @@ package service
 
 import "errors"
 
-// Ошибки сервисного слоя
+// Ошибки сервисного слоя.
+// Каждая ошибка — sentinel-значение, используемое хендлером
+// для выбора HTTP-кода ответа без импорта пакета repository.
 
 var (
-	// ErrLoginTaken — логин уже занят.
+	// ErrLoginTaken — логин уже занят другим пользователем.
 	ErrLoginTaken = errors.New("логин уже занят")
 
 	// ErrInvalidCredentials — неверная пара логин/пароль.

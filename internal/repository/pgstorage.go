@@ -217,7 +217,7 @@ func (s *pgStorage) WithdrawPoints(ctx context.Context, userID int64, orderNo st
 }
 
 // ListWithdrawals возвращает все списания пользователя userID,
-// отсортированные от самых новых к самым старых по времени списания.
+// отсортированные от самых новых к самым старым по времени списания.
 func (s *pgStorage) ListWithdrawals(ctx context.Context, userID int64) ([]Withdrawal, error) {
 	const q = `SELECT order_number, sum, processed_at
 	           FROM withdrawals

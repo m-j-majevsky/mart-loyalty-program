@@ -109,6 +109,19 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rt.mux.ServeHTTP(w, r)
 }
 
+// getUserIDInt64 — вспомогательная функция, извлекающая ID пользователя
+// из контекста запроса и преобразующая его в int64.
+// Используется во всех защищённых хендлерах, чтобы избежать
+// дублирования пары getUserIDFromContext + strconv.ParseInt.
+// Возвращает ID пользователя или ошибку, если пользователь не аутентифицирован.
+func getUserIDInt64(r *http.Request) (int64, error) {
+	userIDStr, err := getUserIDFromContext(r.Context())
+	if err != nil {
+		return 0, err
+	}
+	return strconv.ParseInt(userIDStr, 10, 64)
+}
+
 // register обрабатывает POST /api/user/register — регистрацию нового пользователя.
 // Принимает JSON с полями login и password. При успехе устанавливает cookie
 // с JWT-токеном и возвращает 200. Если логин занят — 409.
@@ -137,13 +150,13 @@ func (rt *Router) register(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "логин уже занят", http.StatusConflict)
 			return
 		}
-		logger.Log.Error("register failed", zap.Error(err))
+		logger.Log.Error("ошибка регистрации", zap.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 
 	if err := setAuthCookie(w, rt.cookieName, rt.cookieTTL, rt.signingKey, strconv.FormatInt(userID, 10)); err != nil {
-		logger.Log.Error("set auth cookie failed", zap.Error(err))
+		logger.Log.Error("ошибка установки cookie аутентификации", zap.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
@@ -179,13 +192,13 @@ func (rt *Router) login(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "неверная пара логин/пароль", http.StatusUnauthorized)
 			return
 		}
-		logger.Log.Error("login failed", zap.Error(err))
+		logger.Log.Error("ошибка аутентификации", zap.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 
 	if err := setAuthCookie(w, rt.cookieName, rt.cookieTTL, rt.signingKey, strconv.FormatInt(userID, 10)); err != nil {
-		logger.Log.Error("set auth cookie failed", zap.Error(err))
+		logger.Log.Error("ошибка установки cookie аутентификации", zap.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
@@ -198,12 +211,7 @@ func (rt *Router) login(w http.ResponseWriter, r *http.Request) {
 // Если заказ уже загружен этим пользователем — 200, другим — 409.
 // Новый заказ — 202 и постановка в очередь на опрос accrual-системы.
 func (rt *Router) uploadOrder(w http.ResponseWriter, r *http.Request) {
-	userIDStr, err := getUserIDFromContext(r.Context())
-	if err != nil {
-		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
-		return
-	}
-	userID, err := strconv.ParseInt(userIDStr, 10, 64)
+	userID, err := getUserIDInt64(r)
 	if err != nil {
 		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 		return
@@ -231,12 +239,13 @@ func (rt *Router) uploadOrder(w http.ResponseWriter, r *http.Request) {
 
 	err = rt.service.UploadOrder(ctx, orderNumber, userID)
 	if err != nil {
-		var eoae *repository.ErrOrderAlreadyExists
-		if errors.As(err, &eoae) {
-			// Заказ уже существует — определяем владельца одним запросом
+		// Заказ уже существует — определяем владельца одним запросом.
+		// Хендлер проверяет ошибку сервисного слоя (а не repository),
+		// что избавляет его от зависимости на пакет хранилища.
+		if errors.Is(err, service.ErrOrderAlreadyExists) {
 			ownerID, ownerErr := rt.service.GetOrderByNumber(ctx, orderNumber)
 			if ownerErr != nil {
-				logger.Log.Error("get order owner failed", zap.Error(ownerErr))
+				logger.Log.Error("ошибка определения владельца заказа", zap.Error(ownerErr))
 				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 				return
 			}
@@ -248,7 +257,7 @@ func (rt *Router) uploadOrder(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "номер заказа уже загружен другим пользователем", http.StatusConflict)
 			return
 		}
-		logger.Log.Error("upload order failed", zap.Error(err))
+		logger.Log.Error("ошибка загрузки заказа", zap.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
@@ -261,12 +270,7 @@ func (rt *Router) uploadOrder(w http.ResponseWriter, r *http.Request) {
 // Возвращает JSON-массив, отсортированный от новых к старым.
 // Если заказов нет — 204.
 func (rt *Router) listOrders(w http.ResponseWriter, r *http.Request) {
-	userIDStr, err := getUserIDFromContext(r.Context())
-	if err != nil {
-		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
-		return
-	}
-	userID, err := strconv.ParseInt(userIDStr, 10, 64)
+	userID, err := getUserIDInt64(r)
 	if err != nil {
 		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 		return
@@ -277,7 +281,7 @@ func (rt *Router) listOrders(w http.ResponseWriter, r *http.Request) {
 
 	orders, err := rt.service.ListUserOrders(ctx, userID)
 	if err != nil {
-		logger.Log.Error("list orders failed", zap.Error(err))
+		logger.Log.Error("ошибка получения списка заказов", zap.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
@@ -313,19 +317,14 @@ func (rt *Router) listOrders(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewEncoder(w).Encode(items); err != nil {
-		logger.Log.Error("encode orders response failed", zap.Error(err))
+		logger.Log.Error("ошибка кодирования ответа со списком заказов", zap.Error(err))
 	}
 }
 
 // getBalance обрабатывает GET /api/user/balance — получение текущего баланса
 // и суммы всех списаний пользователя. Возвращает JSON с полями current и withdrawn.
 func (rt *Router) getBalance(w http.ResponseWriter, r *http.Request) {
-	userIDStr, err := getUserIDFromContext(r.Context())
-	if err != nil {
-		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
-		return
-	}
-	userID, err := strconv.ParseInt(userIDStr, 10, 64)
+	userID, err := getUserIDInt64(r)
 	if err != nil {
 		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 		return
@@ -336,7 +335,7 @@ func (rt *Router) getBalance(w http.ResponseWriter, r *http.Request) {
 
 	balance, withdrawn, err := rt.service.GetBalance(ctx, userID)
 	if err != nil {
-		logger.Log.Error("get balance failed", zap.Error(err))
+		logger.Log.Error("ошибка получения баланса", zap.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
@@ -353,7 +352,7 @@ func (rt *Router) getBalance(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		logger.Log.Error("encode balance response failed", zap.Error(err))
+		logger.Log.Error("ошибка кодирования ответа с балансом", zap.Error(err))
 	}
 }
 
@@ -363,12 +362,7 @@ func (rt *Router) getBalance(w http.ResponseWriter, r *http.Request) {
 // создаёт заказ и запись о списании в одной транзакции, ставит заказ
 // в очередь на опрос accrual-системы.
 func (rt *Router) withdraw(w http.ResponseWriter, r *http.Request) {
-	userIDStr, err := getUserIDFromContext(r.Context())
-	if err != nil {
-		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
-		return
-	}
-	userID, err := strconv.ParseInt(userIDStr, 10, 64)
+	userID, err := getUserIDInt64(r)
 	if err != nil {
 		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 		return
@@ -404,19 +398,19 @@ func (rt *Router) withdraw(w http.ResponseWriter, r *http.Request) {
 
 	err = rt.service.WithdrawPoints(ctx, userID, req.Order, req.Sum)
 	if err != nil {
-		var eif *repository.ErrInsufficientFunds
-		if errors.As(err, &eif) {
+		// Хендлер проверяет ошибки сервисного слоя, а не repository.
+		// Это избавляет его от прямой зависимости на пакет хранилища.
+		if errors.Is(err, service.ErrInsufficientFunds) {
 			http.Error(w, "на счету недостаточно средств", http.StatusPaymentRequired)
 			return
 		}
 
-		var eoae *repository.ErrOrderAlreadyExists
-		if errors.As(err, &eoae) {
+		if errors.Is(err, service.ErrOrderAlreadyExists) {
 			http.Error(w, "заказ уже зарегистрирован", http.StatusUnprocessableEntity)
 			return
 		}
 
-		logger.Log.Error("withdraw failed", zap.Error(err))
+		logger.Log.Error("ошибка списания баллов", zap.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
@@ -428,12 +422,7 @@ func (rt *Router) withdraw(w http.ResponseWriter, r *http.Request) {
 // всех списаний пользователя. Возвращает JSON-массив, отсортированный
 // от новых к старым. Если списаний нет — 204.
 func (rt *Router) listWithdrawals(w http.ResponseWriter, r *http.Request) {
-	userIDStr, err := getUserIDFromContext(r.Context())
-	if err != nil {
-		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
-		return
-	}
-	userID, err := strconv.ParseInt(userIDStr, 10, 64)
+	userID, err := getUserIDInt64(r)
 	if err != nil {
 		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 		return
@@ -444,7 +433,7 @@ func (rt *Router) listWithdrawals(w http.ResponseWriter, r *http.Request) {
 
 	withdrawals, err := rt.service.ListWithdrawals(ctx, userID)
 	if err != nil {
-		logger.Log.Error("list withdrawals failed", zap.Error(err))
+		logger.Log.Error("ошибка получения списка списаний", zap.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
@@ -464,16 +453,18 @@ func (rt *Router) listWithdrawals(w http.ResponseWriter, r *http.Request) {
 	}
 
 	items := make([]withdrawalItem, 0, len(withdrawals))
-	for _, w := range withdrawals {
+	// Переменная цикла названа wl, а не w, чтобы не затенять
+	// параметр-ResponseWriter (govet: shadow).
+	for _, wl := range withdrawals {
 		items = append(items, withdrawalItem{
-			Order:       w.OrderNumber,
-			Sum:         w.Sum,
-			ProcessedAt: w.ProcessedAt,
+			Order:       wl.OrderNumber,
+			Sum:         wl.Sum,
+			ProcessedAt: wl.ProcessedAt,
 		})
 	}
 
 	if err := json.NewEncoder(w).Encode(items); err != nil {
-		logger.Log.Error("encode withdrawals response failed", zap.Error(err))
+		logger.Log.Error("ошибка кодирования ответа со списком списаний", zap.Error(err))
 	}
 }
 
@@ -484,7 +475,7 @@ func (rt *Router) pingDB(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	if err := rt.service.Ping(ctx); err != nil {
-		logger.Log.Error("database ping failed", zap.Error(err))
+		logger.Log.Error("ошибка проверки доступности базы данных", zap.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}

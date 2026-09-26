@@ -8,22 +8,30 @@ import (
 )
 
 // ErrTokenInvalid означает, что JWT-токен невалиден или не может быть разобран.
+// Поле inner хранит исходную ошибку парсинга (неэкспортировано — деталь реализации).
+// Метод Unwrap позволяет использовать errors.Is с исходной ошибкой.
 type ErrTokenInvalid struct {
-	Err error
+	inner error
 }
 
 // Error возвращает текстовое описание ошибки.
 func (e *ErrTokenInvalid) Error() string {
 	msg := "токен невалиден"
-	if e.Err != nil {
-		msg = fmt.Sprintf("%s: %v", msg, e.Err)
+	if e.inner != nil {
+		msg = fmt.Sprintf("%s: %v", msg, e.inner)
 	}
 	return msg
 }
 
+// Unwrap возвращает исходную ошибку, обёрнутую в ErrTokenInvalid.
+// Позволяет использовать errors.Is и errors.As с корневой причиной.
+func (e *ErrTokenInvalid) Unwrap() error {
+	return e.inner
+}
+
 // NewErrTokenInvalid конструирует ошибку ErrTokenInvalid, оборачивая исходную.
 func NewErrTokenInvalid(err error) error {
-	return &ErrTokenInvalid{Err: err}
+	return &ErrTokenInvalid{inner: err}
 }
 
 // Claims описывает структуру JWT-клеймов с пользовательским полем UserID.

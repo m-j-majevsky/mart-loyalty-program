@@ -1,7 +1,5 @@
 package luhn
 
-import "fmt"
-
 // IsValid проверяет строку number на соответствие алгоритму Луна.
 // Строка должна состоять только из цифр и иметь длину не менее одной цифры.
 // Возвращает true, если контрольная сумма проходит проверку, и false в противном случае.
@@ -33,13 +31,4 @@ func IsValid(number string) bool {
 	}
 
 	return sum%10 == 0
-}
-
-// Validate возвращает ошибку, если строка number не проходит
-// проверку алгоритмом Луна или содержит нецифровые символы.
-func Validate(number string) error {
-	if !IsValid(number) {
-		return fmt.Errorf("неверный номер заказа: %s", number)
-	}
-	return nil
 }
