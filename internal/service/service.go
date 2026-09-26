@@ -153,6 +153,32 @@ func (s *GopherMart) ListWithdrawals(ctx context.Context, userID int64) ([]repos
 	return s.config.Storage.ListWithdrawals(ctx, userID)
 }
 
+// GetOrderByNumber возвращает ID пользователя-владельца заказа по его номеру.
+// Делегирует вызов хранилищу. Используется хендлером для различения
+// ситуаций «заказ загружен этим пользователем» (200) и «другим» (409).
+func (s *GopherMart) GetOrderByNumber(ctx context.Context, number string) (int64, error) {
+	return s.config.Storage.GetOrderByNumber(ctx, number)
+}
+
+// EnqueuePendingOrders выбирает из БД все заказы в статусах NEW и PROCESSING
+// и ставит их в очередь на опрос accrual-системы. Вызывается при запуске
+// сервиса для восстановления обработки после перезапуска.
+func (s *GopherMart) EnqueuePendingOrders(ctx context.Context) error {
+	numbers, err := s.config.Storage.ListPendingOrderNumbers(ctx)
+	if err != nil {
+		return fmt.Errorf("ошибка получения незавершённых заказов: %w", err)
+	}
+
+	for _, n := range numbers {
+		s.enqueueOrder(n)
+	}
+
+	logger.Log.Info("pending orders enqueued for accrual processing",
+		zap.Int("count", len(numbers)))
+
+	return nil
+}
+
 // enqueueOrder ставит номер заказа в очередь на опрос accrual-системы.
 // Если очередь переполнена, логирует предупреждение — заказ останется
 // в БД со статусом NEW и будет обработан при рестарте.
@@ -189,7 +215,7 @@ func (s *GopherMart) StartAccrualProcessor(ctx context.Context) {
 }
 
 // StopAccrualProcessor закрывает канал accrualQueue, что приводит
-// / к завершению accrual worker'а и последующей остановке batch processor'а.
+// к завершению accrual worker'а и последующей остановке batch processor'а.
 func (s *GopherMart) StopAccrualProcessor() {
 	close(s.accrualQueue)
 }

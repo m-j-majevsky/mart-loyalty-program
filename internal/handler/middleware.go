@@ -10,8 +10,6 @@ import (
 	"time"
 
 	"github.com/m-j-majevsky/gophermart/internal/auth"
-	"github.com/m-j-majevsky/gophermart/internal/logger"
-	"go.uber.org/zap"
 )
 
 // Константы Content-Type
@@ -206,7 +204,3 @@ func setAuthCookie(w http.ResponseWriter, cookieName string, ttl time.Duration, 
 
 	return nil
 }
-
-// _ подавляет неиспользуемый импорт logger/zap — будет задействован в handler.go
-var _ = logger.Log
-var _ = zap.String

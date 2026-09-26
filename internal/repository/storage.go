@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -57,6 +56,11 @@ type Storage interface {
 	// Если заказ с таким номером уже существует, возвращает ErrOrderAlreadyExists.
 	CreateOrder(ctx context.Context, number string, userID int64) error
 
+	// GetOrderByNumber ищет заказ по номеру и возвращает ID пользователя-владельца.
+	// Используется для определения, кем был загружен заказ при обработке дубликата.
+	// Возвращает ErrOrderNotFound, если заказ не найден.
+	GetOrderByNumber(ctx context.Context, number string) (int64, error)
+
 	// ListUserOrders возвращает все заказы пользователя, отсортированные
 	// от самых новых к самым старым по времени загрузки.
 	ListUserOrders(ctx context.Context, userID int64) ([]Order, error)
@@ -74,6 +78,11 @@ type Storage interface {
 	// ListWithdrawals возвращает все списания пользователя, отсортированные
 	// от самых новых к самым старых по времени списания.
 	ListWithdrawals(ctx context.Context, userID int64) ([]Withdrawal, error)
+
+	// ListPendingOrderNumbers возвращает номера всех заказов в статусах
+	// NEW и PROCESSING, которые требуют опроса accrual-системы.
+	// Используется при запуске сервиса для восстановления очереди после перезапуска.
+	ListPendingOrderNumbers(ctx context.Context) ([]string, error)
 
 	// BatchUpdateOrders пакетно обновляет статусы и начисления для списка заказов.
 	// Для каждого заказа со статусом PROCESSED начисляет баллы на баланс пользователя.
@@ -127,6 +136,20 @@ func (e *ErrOrderAlreadyExists) Error() string {
 	return fmt.Sprintf("заказ %s уже зарегистрирован", e.Number)
 }
 
+// ErrOrderNotFound означает, что заказ с указанным номером не найден.
+type ErrOrderNotFound struct {
+	Number string
+}
+
+// NewErrOrderNotFound конструирует ошибку ErrOrderNotFound.
+func NewErrOrderNotFound(number string) error {
+	return &ErrOrderNotFound{Number: number}
+}
+
+func (e *ErrOrderNotFound) Error() string {
+	return fmt.Sprintf("заказ %s не найден", e.Number)
+}
+
 // ErrInsufficientFunds означает, что на балансе пользователя недостаточно баллов.
 type ErrInsufficientFunds struct{}
 
@@ -152,6 +175,3 @@ func NewErrOrderOwnedByAnother(number string) error {
 func (e *ErrOrderOwnedByAnother) Error() string {
 	return fmt.Sprintf("заказ %s загружен другим пользователем", e.Number)
 }
-
-// errors.Is helper для удобства
-var _ = errors.Is

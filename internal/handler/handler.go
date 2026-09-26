@@ -32,6 +32,7 @@ type GopherMartService interface {
 	ListUserOrders(ctx context.Context, userID int64) ([]repository.Order, error)
 	GetBalance(ctx context.Context, userID int64) (decimal.Decimal, decimal.Decimal, error)
 	ListWithdrawals(ctx context.Context, userID int64) ([]repository.Withdrawal, error)
+	GetOrderByNumber(ctx context.Context, number string) (int64, error)
 	Ping(ctx context.Context) error
 }
 
@@ -232,25 +233,15 @@ func (rt *Router) uploadOrder(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var eoae *repository.ErrOrderAlreadyExists
 		if errors.As(err, &eoae) {
-			// Проверяем, кем загружен заказ — нужно различать 200 и 409
-			// Для черновой версии: если CreateOrder вернула ErrOrderAlreadyExists,
-			// проверяем владельца через ListUserOrders
-			orders, listErr := rt.service.ListUserOrders(ctx, userID)
-			if listErr != nil {
-				logger.Log.Error("list orders failed", zap.Error(listErr))
+			// Заказ уже существует — определяем владельца одним запросом
+			ownerID, ownerErr := rt.service.GetOrderByNumber(ctx, orderNumber)
+			if ownerErr != nil {
+				logger.Log.Error("get order owner failed", zap.Error(ownerErr))
 				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 				return
 			}
 
-			ownedByUser := false
-			for _, o := range orders {
-				if o.Number == orderNumber {
-					ownedByUser = true
-					break
-				}
-			}
-
-			if ownedByUser {
+			if ownerID == userID {
 				w.WriteHeader(http.StatusOK)
 				return
 			}
@@ -313,7 +304,8 @@ func (rt *Router) listOrders(w http.ResponseWriter, r *http.Request) {
 			Status:     o.Status,
 			UploadedAt: o.UploadedAt,
 		}
-		if o.Accrual.GreaterThan(decimal.Zero) {
+		// accrual включается только для PROCESSED-заказов с положительным значением
+		if o.Status == "PROCESSED" && o.Accrual.GreaterThan(decimal.Zero) {
 			accrual := o.Accrual
 			item.Accrual = &accrual
 		}

@@ -71,6 +71,11 @@ func main() {
 		logger.Log.Fatal("ошибка инициализации сервиса", zap.Error(err))
 	}
 
+	// Восстанавливаем очередь незавершённых заказов после рестарта
+	if err := svc.EnqueuePendingOrders(ctx); err != nil {
+		logger.Log.Error("ошибка восстановления очереди заказов", zap.Error(err))
+	}
+
 	// Создаём роутер
 	routerParams := handler.NewRouterParams(cfg, svc)
 	rt, err := handler.NewRouter(routerParams)

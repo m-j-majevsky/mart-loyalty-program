@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -85,6 +84,23 @@ func (s *pgStorage) CreateOrder(ctx context.Context, number string, userID int64
 	}
 
 	return nil
+}
+
+// GetOrderByNumber ищет заказ по номеру и возвращает ID пользователя-владельца.
+// Возвращает ErrOrderNotFound, если заказ с таким номером не найден.
+func (s *pgStorage) GetOrderByNumber(ctx context.Context, number string) (int64, error) {
+	const q = `SELECT user_id FROM orders WHERE number = $1`
+
+	var userID int64
+	err := s.db.QueryRow(ctx, q, number).Scan(&userID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, NewErrOrderNotFound(number)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("ошибка запроса заказа по номеру %s: %w", number, err)
+	}
+
+	return userID, nil
 }
 
 // ListUserOrders возвращает все заказы пользователя userID,
@@ -230,6 +246,34 @@ func (s *pgStorage) ListWithdrawals(ctx context.Context, userID int64) ([]Withdr
 	return withdrawals, nil
 }
 
+// ListPendingOrderNumbers возвращает номера всех заказов в статусах
+// NEW и PROCESSING, которые требуют опроса accrual-системы.
+// Используется при запуске сервиса для восстановления очереди после перезапуска.
+func (s *pgStorage) ListPendingOrderNumbers(ctx context.Context) ([]string, error) {
+	const q = `SELECT number FROM orders WHERE status IN ('NEW', 'PROCESSING')`
+
+	rows, err := s.db.Query(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка запроса незавершённых заказов: %w", err)
+	}
+	defer rows.Close()
+
+	var numbers []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, fmt.Errorf("ошибка чтения номера заказа: %w", err)
+		}
+		numbers = append(numbers, n)
+	}
+
+	if rows.Err() != nil {
+		return nil, fmt.Errorf("ошибка итерации по строкам заказов: %w", rows.Err())
+	}
+
+	return numbers, nil
+}
+
 // BatchUpdateOrders пакетно обновляет статусы и начисления для списка заказов.
 // Для каждого заказа со статусом PROCESSED и положительным accrual
 // начисляет баллы на баланс пользователя — владельца заказа.
@@ -280,6 +324,3 @@ func (s *pgStorage) BatchUpdateOrders(ctx context.Context, updates []OrderUpdate
 func (s *pgStorage) Ping(ctx context.Context) error {
 	return s.db.Ping(ctx)
 }
-
-// strings импортирован для будущего использования (динамический SQL)
-var _ = strings.Builder{}
