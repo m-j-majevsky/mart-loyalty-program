@@ -46,14 +46,14 @@ type WithdrawalDTO struct {
 // ServiceConfig содержит параметры работы сервисного слоя.
 type ServiceConfig struct {
 	Storage              repository.Storage // хранилище данных
-	AccrualClient        AccrualClient     // клиент accrual-системы (интерфейс, не конкретный тип)
-	BcryptCost           int               // стоимость bcrypt (10–14)
-	AccrualQueueBuffer   int               // размер канала очереди запросов в accrual
-	DBUpdateQueueBuffer  int               // размер канала очереди обновлений в БД
-	DBUpdateBatchSize    int               // максимальный размер батча обновления БД
-	DBUpdateFlushTimeout time.Duration     // период сброса батча в БД
-	AccrualPollInterval  time.Duration     // задержка между запросами к accrual
-	AccrualRetryDelay    time.Duration     // задержка перед повторным опросом нефинального заказа
+	AccrualClient        AccrualClient      // клиент accrual-системы (интерфейс, не конкретный тип)
+	BcryptCost           int                // стоимость bcrypt (10–14)
+	AccrualQueueBuffer   int                // размер канала очереди запросов в accrual
+	DBUpdateQueueBuffer  int                // размер канала очереди обновлений в БД
+	DBUpdateBatchSize    int                // максимальный размер батча обновления БД
+	DBUpdateFlushTimeout time.Duration      // период сброса батча в БД
+	AccrualPollInterval  time.Duration      // задержка между запросами к accrual
+	AccrualRetryDelay    time.Duration      // задержка перед повторным опросом нефинального заказа
 }
 
 // DefaultServiceConfig возвращает конфигурацию сервиса с значениями по умолчанию.
@@ -329,7 +329,7 @@ func (s *GopherMart) StopAccrualProcessor() {
 //     обновление в dbUpdateQueue;
 //   - при нефинальном статусе (REGISTERED, PROCESSING) или коде 204 —
 //     повторно ставит заказ в очередь через AccrualRetryDelay;
-//   - при коде 429 — ставит заказ в очередь через Retry-After.
+//   - при коде 429 — полная остановка на Retry-After.
 //
 // Между запросами выдерживается AccrualPollInterval.
 // Воркер завершается при закрытии closed или отмене ctx,
@@ -345,11 +345,18 @@ func (s *GopherMart) runAccrualWorker(ctx context.Context) {
 			return
 
 		case orderNumber := <-s.accrualQueue:
-			s.processOneOrder(ctx, orderNumber)
+			delay := s.processOneOrder(ctx, orderNumber)
 
-			// Задержка между запросами к accrual
+			// Задержка между запросами к accrual-системе.
+			// При 429 — полная остановка на Retry-After (delay > 0),
+			// иначе — стандартный AccrualPollInterval.
+			wait := s.config.AccrualPollInterval
+			if delay > 0 {
+				wait = delay
+			}
+
 			select {
-			case <-time.After(s.config.AccrualPollInterval):
+			case <-time.After(wait):
 			case <-s.closed:
 				close(s.dbUpdateQueue)
 				return
@@ -364,17 +371,24 @@ func (s *GopherMart) runAccrualWorker(ctx context.Context) {
 // processOneOrder опрашивает accrual-систему по одному заказу и маршрутизирует ответ.
 // При ошибке или нефинальном статусе заказ переотправляется в очередь через
 // requeueOrder с соответствующей задержкой.
-func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string) {
+//
+// Возвращает задержку, на которую воркер должен приостановиться перед следующим
+// запросом к accrual-системе:
+//   - 0 — использовать стандартный AccrualPollInterval;
+//   - >0 — при 429: воркер полностью останавливается на указанный срок (Retry-After),
+//     чтобы не получить бан от accrual-системы.
+func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string) time.Duration {
 	resp, err := s.config.AccrualClient.GetOrderAccrual(ctx, orderNumber)
 	if err != nil {
 		var etmr *accrual.ErrTooManyRequests
 		if errors.As(err, &etmr) {
-			logger.Log.Info("превышен лимит запросов к accrual-системе",
+			logger.Log.Info("превышен лимит запросов к accrual-системе, приостанавливаем воркер",
 				zap.String("заказ", orderNumber),
 				zap.Int("повтор_через_сек", etmr.RetryAfter))
 			// Ставим в очередь с задержкой из Retry-After
 			s.requeueOrder(orderNumber, time.Duration(etmr.RetryAfter)*time.Second)
-			return
+			// Возвращаем задержку, чтобы воркер полностью остановился на Retry-After
+			return time.Duration(etmr.RetryAfter) * time.Second
 		}
 
 		var enr *accrual.ErrNotRegistered
@@ -382,14 +396,14 @@ func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string) {
 			logger.Log.Debug("заказ не зарегистрирован в accrual-системе",
 				zap.String("заказ", orderNumber))
 			s.requeueOrder(orderNumber, s.config.AccrualRetryDelay)
-			return
+			return 0
 		}
 
 		logger.Log.Error("ошибка запроса к accrual-системе",
 			zap.String("заказ", orderNumber),
 			zap.Error(err))
 		s.requeueOrder(orderNumber, s.config.AccrualRetryDelay)
-		return
+		return 0
 	}
 
 	// Маппинг статусов accrual → внутренние
@@ -423,6 +437,8 @@ func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string) {
 	if internalStatus == "PROCESSING" {
 		s.requeueOrder(orderNumber, s.config.AccrualRetryDelay)
 	}
+
+	return 0
 }
 
 // requeueOrder ставит заказ в очередь accrual после указанной задержки.
