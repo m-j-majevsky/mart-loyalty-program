@@ -18,17 +18,17 @@ type User struct {
 
 // Order представляет запись заказа в базе данных.
 type Order struct {
-	Number     string          // номер заказа
-	Status     string          // внутренний статус: NEW, PROCESSING, INVALID, PROCESSED
-	Accrual    decimal.Decimal // начисленные баллы (для PROCESSED)
-	UploadedAt time.Time       // время загрузки заказа в систему
+	Number     string          `db:"number"`      // номер заказа
+	Status     string          `db:"status"`      // внутренний статус: NEW, PROCESSING, INVALID, PROCESSED
+	Accrual    decimal.Decimal `db:"accrual"`     // начисленные баллы (для PROCESSED)
+	UploadedAt time.Time       `db:"uploaded_at"` // время загрузки заказа в систему
 }
 
 // Withdrawal представляет запись о списании баллов.
 type Withdrawal struct {
-	OrderNumber string          // номер заказа, в счёт которого списаны баллы
-	Sum         decimal.Decimal // сумма списания
-	ProcessedAt time.Time       // время списания
+	OrderNumber string          `db:"order_number"` // номер заказа, в счёт которого списаны баллы
+	Sum         decimal.Decimal `db:"sum"`          // сумма списания
+	ProcessedAt time.Time       `db:"processed_at"` // время списания
 }
 
 // OrderUpdate содержит данные для пакетного обновления статуса заказа
@@ -46,7 +46,6 @@ type ErrLoginTaken struct {
 	Login string
 }
 
-// NewErrLoginTaken конструирует ошибку ErrLoginTaken.
 func NewErrLoginTaken(login string) error {
 	return &ErrLoginTaken{Login: login}
 }
@@ -60,7 +59,6 @@ type ErrUserNotFound struct {
 	Login string
 }
 
-// NewErrUserNotFound конструирует ошибку ErrUserNotFound.
 func NewErrUserNotFound(login string) error {
 	return &ErrUserNotFound{Login: login}
 }
@@ -74,7 +72,6 @@ type ErrOrderAlreadyExists struct {
 	Number string
 }
 
-// NewErrOrderAlreadyExists конструирует ошибку ErrOrderAlreadyExists.
 func NewErrOrderAlreadyExists(number string) error {
 	return &ErrOrderAlreadyExists{Number: number}
 }
@@ -88,7 +85,6 @@ type ErrOrderNotFound struct {
 	Number string
 }
 
-// NewErrOrderNotFound конструирует ошибку ErrOrderNotFound.
 func NewErrOrderNotFound(number string) error {
 	return &ErrOrderNotFound{Number: number}
 }
@@ -100,7 +96,6 @@ func (e *ErrOrderNotFound) Error() string {
 // ErrInsufficientFunds означает, что на балансе пользователя недостаточно баллов.
 type ErrInsufficientFunds struct{}
 
-// NewErrInsufficientFunds конструирует ошибку ErrInsufficientFunds.
 func NewErrInsufficientFunds() error {
 	return &ErrInsufficientFunds{}
 }

@@ -22,8 +22,7 @@ type dbtx interface {
 	Begin(ctx context.Context) (pgx.Tx, error)
 }
 
-// pgStorage — реализация интерфейсов хранилища (service.UserStore, OrderStore, WithdrawalStore, Pinger)
-// на PostgreSQL через pgx. Интерфейсы определены в пакете service, pgStorage удовлетворяет им неявно.
+// pgStorage — реализация интерфейсов хранилища (service.UserStore, OrderStore, WithdrawalStore, Pinger).
 type pgStorage struct {
 	db dbtx
 }
@@ -38,7 +37,9 @@ func NewPgStorage(db dbtx) *pgStorage {
 // Возвращает ID созданного пользователя.
 // Если логин уже занят, возвращает ErrLoginTaken.
 func (s *pgStorage) CreateUser(ctx context.Context, login, passwordHash string) (int64, error) {
-	const q = `INSERT INTO users (login, password_hash) VALUES ($1, $2) RETURNING id`
+	const q = `INSERT INTO users (login, password_hash) 
+	           VALUES ($1, $2) 
+			   RETURNING id`
 
 	var id int64
 	err := s.db.QueryRow(ctx, q, login, passwordHash).Scan(&id)
@@ -56,7 +57,9 @@ func (s *pgStorage) CreateUser(ctx context.Context, login, passwordHash string) 
 // GetUserByLogin ищет пользователя по логину.
 // Возвращает структуру User или ErrUserNotFound, если пользователь не найден.
 func (s *pgStorage) GetUserByLogin(ctx context.Context, login string) (User, error) {
-	const q = `SELECT id, login, password_hash, balance, withdrawn FROM users WHERE login = $1`
+	const q = `SELECT id, login, password_hash, balance, withdrawn 
+	           FROM users 
+			   WHERE login = $1`
 
 	var u User
 	err := s.db.QueryRow(ctx, q, login).Scan(&u.ID, &u.Login, &u.PasswordHash, &u.Balance, &u.Withdrawn)
@@ -73,7 +76,8 @@ func (s *pgStorage) GetUserByLogin(ctx context.Context, login string) (User, err
 // CreateOrder создаёт запись о новом заказе для пользователя userID.
 // Если заказ с таким номером уже существует в системе, возвращает ErrOrderAlreadyExists.
 func (s *pgStorage) CreateOrder(ctx context.Context, number string, userID int64) error {
-	const q = `INSERT INTO orders (number, user_id, status) VALUES ($1, $2, 'NEW')`
+	const q = `INSERT INTO orders (number, user_id, status) 
+	           VALUES ($1, $2, 'NEW')`
 
 	_, err := s.db.Exec(ctx, q, number, userID)
 	if err != nil {
@@ -118,17 +122,9 @@ func (s *pgStorage) ListUserOrders(ctx context.Context, userID int64) ([]Order, 
 	}
 	defer rows.Close()
 
-	var orders []Order
-	for rows.Next() {
-		var o Order
-		if err := rows.Scan(&o.Number, &o.Status, &o.Accrual, &o.UploadedAt); err != nil {
-			return nil, fmt.Errorf("ошибка чтения строки заказа: %w", err)
-		}
-		orders = append(orders, o)
-	}
-
-	if rows.Err() != nil {
-		return nil, fmt.Errorf("ошибка итерации по строкам заказов: %w", rows.Err())
+	orders, err := pgx.CollectRows(rows, pgx.RowToStructByName[Order])
+	if err != nil {
+		return nil, fmt.Errorf("ошибка чтения ответа от хранилища: %w", err)
 	}
 
 	return orders, nil
@@ -175,11 +171,10 @@ func (s *pgStorage) WithdrawPoints(ctx context.Context, userID int64, orderNo st
 	var newBalance decimal.Decimal
 	err = tx.QueryRow(ctx, `
 		UPDATE users
-		   SET balance = balance - $1,
-		       withdrawn = withdrawn + $1
-		 WHERE id = $2 AND balance >= $1
+		SET balance = balance - $1, withdrawn = withdrawn + $1
+		WHERE id = $2 AND balance >= $1
 		RETURNING balance
-	`, sum, userID).Scan(&newBalance)
+	    `, sum, userID).Scan(&newBalance)
 
 	if errors.Is(err, pgx.ErrNoRows) {
 		return NewErrInsufficientFunds()
@@ -188,12 +183,11 @@ func (s *pgStorage) WithdrawPoints(ctx context.Context, userID int64, orderNo st
 		return fmt.Errorf("ошибка списания баллов: %w", err)
 	}
 
-	// Шаг 3: вставляем заказ (accrual не указываем — используется DEFAULT 0,
-	// аналогично CreateOrder)
+	// Шаг 3: вставляем заказ (accrual не указываем — используется DEFAULT 0, аналогично CreateOrder)
 	_, err = tx.Exec(ctx, `
 		INSERT INTO orders (number, user_id, status)
 		VALUES ($1, $2, 'NEW')
-	`, orderNo, userID)
+	    `, orderNo, userID)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -206,7 +200,7 @@ func (s *pgStorage) WithdrawPoints(ctx context.Context, userID int64, orderNo st
 	_, err = tx.Exec(ctx, `
 		INSERT INTO withdrawals (user_id, order_number, sum)
 		VALUES ($1, $2, $3)
-	`, userID, orderNo, sum)
+	    `, userID, orderNo, sum)
 	if err != nil {
 		return fmt.Errorf("ошибка записи о списании: %w", err)
 	}
@@ -232,17 +226,9 @@ func (s *pgStorage) ListWithdrawals(ctx context.Context, userID int64) ([]Withdr
 	}
 	defer rows.Close()
 
-	var withdrawals []Withdrawal
-	for rows.Next() {
-		var w Withdrawal
-		if err := rows.Scan(&w.OrderNumber, &w.Sum, &w.ProcessedAt); err != nil {
-			return nil, fmt.Errorf("ошибка чтения строки списания: %w", err)
-		}
-		withdrawals = append(withdrawals, w)
-	}
-
-	if rows.Err() != nil {
-		return nil, fmt.Errorf("ошибка итерации по строкам списаний: %w", rows.Err())
+	withdrawals, err := pgx.CollectRows(rows, pgx.RowToStructByName[Withdrawal])
+	if err != nil {
+		return nil, fmt.Errorf("ошибка чтения ответа от хранилища: %w", err)
 	}
 
 	return withdrawals, nil
@@ -260,17 +246,9 @@ func (s *pgStorage) ListPendingOrderNumbers(ctx context.Context) ([]string, erro
 	}
 	defer rows.Close()
 
-	var numbers []string
-	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
-			return nil, fmt.Errorf("ошибка чтения номера заказа: %w", err)
-		}
-		numbers = append(numbers, n)
-	}
-
-	if rows.Err() != nil {
-		return nil, fmt.Errorf("ошибка итерации по строкам заказов: %w", rows.Err())
+	numbers, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("ошибка чтения ответа от хранилища: %w", err)
 	}
 
 	return numbers, nil
@@ -291,24 +269,34 @@ func (s *pgStorage) BatchUpdateOrders(ctx context.Context, updates []OrderUpdate
 	}
 	defer tx.Rollback(ctx)
 
+	// Прекомпилируем запрос на обновление таблицы заказов
+	qUpdateOrders := `UPDATE orders
+			          SET status = $1, accrual = $2
+			          WHERE number = $3`
+	qUpdateOrdersTag := "batch_update_orders"
+	if _, err = tx.Prepare(ctx, qUpdateOrdersTag, qUpdateOrders); err != nil {
+		return fmt.Errorf("ошибка подготовки запроса: %w", err)
+	}
+
+	// Прекомпилируем запрос на обновление таблицы пользователей
+	qUpdateUsers := `UPDATE users
+				     SET balance = balance + $1
+				     WHERE id = (SELECT user_id FROM orders WHERE number = $2)`
+	qUpdateUsersTag := "batch_update_users"
+	if _, err = tx.Prepare(ctx, qUpdateUsersTag, qUpdateUsers); err != nil {
+		return fmt.Errorf("ошибка подготовки запроса: %w", err)
+	}
+
 	for _, u := range updates {
 		// Обновляем статус и начисление заказа
-		_, err := tx.Exec(ctx, `
-			UPDATE orders
-			   SET status = $1, accrual = $2
-			 WHERE number = $3
-		`, u.Status, u.Accrual, u.Number)
+		_, err := tx.Exec(ctx, qUpdateOrdersTag, u.Status, u.Accrual, u.Number)
 		if err != nil {
 			return fmt.Errorf("ошибка обновления заказа %s: %w", u.Number, err)
 		}
 
 		// Если заказ обработан и есть начисление — добавляем баллы пользователю
 		if u.Status == "PROCESSED" && u.Accrual.GreaterThan(decimal.Zero) {
-			_, err = tx.Exec(ctx, `
-				UPDATE users
-				   SET balance = balance + $1
-				 WHERE id = (SELECT user_id FROM orders WHERE number = $2)
-			`, u.Accrual, u.Number)
+			_, err = tx.Exec(ctx, qUpdateUsersTag, u.Accrual, u.Number)
 			if err != nil {
 				return fmt.Errorf("ошибка начисления баллов для заказа %s: %w", u.Number, err)
 			}
