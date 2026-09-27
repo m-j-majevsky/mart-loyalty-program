@@ -22,7 +22,8 @@ type dbtx interface {
 	Begin(ctx context.Context) (pgx.Tx, error)
 }
 
-// pgStorage — реализация Storage на PostgreSQL через pgx.
+// pgStorage — реализация интерфейсов хранилища (service.UserStore, OrderStore, WithdrawalStore, Pinger)
+// на PostgreSQL через pgx. Интерфейсы определены в пакете service, pgStorage удовлетворяет им неявно.
 type pgStorage struct {
 	db dbtx
 }

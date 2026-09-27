@@ -16,6 +16,84 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// ---------------------------------------------------------------------------
+// Интерфейсы хранилища.
+// Реализация — repository.pgStorage, удовлетворяющая всем интерфейсам неявно.
+// ---------------------------------------------------------------------------
+
+// UserStore — операции с пользователями: регистрация, поиск, баланс.
+type UserStore interface {
+	// CreateUser регистрирует нового пользователя с указанными логином и хешем пароля.
+	// Возвращает ID созданного пользователя или ошибку, если логин уже занят.
+	CreateUser(ctx context.Context, login, passwordHash string) (int64, error)
+
+	// GetUserByLogin ищет пользователя по логину.
+	// Возвращает структуру repository.User или ошибку, если пользователь не найден.
+	GetUserByLogin(ctx context.Context, login string) (repository.User, error)
+
+	// GetBalance возвращает текущий баланс и сумму списаний пользователя.
+	GetBalance(ctx context.Context, userID int64) (balance, withdrawn decimal.Decimal, err error)
+}
+
+// OrderStore — операции с заказами: создание, поиск, листинг, пакетное обновление.
+type OrderStore interface {
+	// CreateOrder создаёт запись о новом заказе для пользователя userID.
+	// Если заказ с таким номером уже существует, возвращает ErrOrderAlreadyExists.
+	CreateOrder(ctx context.Context, number string, userID int64) error
+
+	// GetOrderByNumber ищет заказ по номеру и возвращает ID пользователя-владельца.
+	// Используется для определения, кем был загружен заказ при обработке дубликата.
+	// Возвращает ErrOrderNotFound, если заказ не найден.
+	GetOrderByNumber(ctx context.Context, number string) (int64, error)
+
+	// ListUserOrders возвращает все заказы пользователя, отсортированные
+	// от самых новых к самым старым по времени загрузки.
+	ListUserOrders(ctx context.Context, userID int64) ([]repository.Order, error)
+
+	// ListPendingOrderNumbers возвращает номера всех заказов в статусах
+	// NEW и PROCESSING, которые требуют опроса accrual-системы.
+	// Используется при запуске сервиса для восстановления очереди после перезапуска.
+	ListPendingOrderNumbers(ctx context.Context) ([]string, error)
+
+	// BatchUpdateOrders пакетно обновляет статусы и начисления для списка заказов.
+	// Для каждого заказа со статусом PROCESSED начисляет баллы на баланс пользователя.
+	BatchUpdateOrders(ctx context.Context, updates []repository.OrderUpdate) error
+}
+
+// WithdrawalStore — операции со списаниями: списание баллов и листинг.
+type WithdrawalStore interface {
+	// WithdrawPoints списывает баллы с баланса пользователя в счёт заказа orderNo.
+	// Выполняется в одной транзакции: блокировка пользователя, проверка баланса,
+	// списание, создание заказа и записи о списании.
+	// Возвращает ErrInsufficientFunds, если баллов недостаточно,
+	// или ErrOrderAlreadyExists, если заказ уже зарегистрирован.
+	WithdrawPoints(ctx context.Context, userID int64, orderNo string, sum decimal.Decimal) error
+
+	// ListWithdrawals возвращает все списания пользователя, отсортированные
+	// от самых новых к самым старым по времени списания.
+	ListWithdrawals(ctx context.Context, userID int64) ([]repository.Withdrawal, error)
+}
+
+// Pinger — проверка доступности хранилища.
+type Pinger interface {
+	// Ping проверяет доступность хранилища.
+	Ping(ctx context.Context) error
+}
+
+// Storage — композиция всех интерфейсов хранилища.
+// Используется в ServiceConfig для передачи хранилища в сервис.
+// Реализация (repository.pgStorage) удовлетворяет этому интерфейсу неявно.
+type Storage interface {
+	UserStore
+	OrderStore
+	WithdrawalStore
+	Pinger
+}
+
+// ---------------------------------------------------------------------------
+// DTO сервисного слоя
+// ---------------------------------------------------------------------------
+
 // AccrualClient — интерфейс клиента внешней системы расчёта баллов.
 // Реализация — accrual.Client, но интерфейс позволяет подменять клиент
 // в тестах с помощью мока, не прибегая к конкретному типу.
@@ -43,17 +121,21 @@ type WithdrawalDTO struct {
 	ProcessedAt time.Time       // время списания
 }
 
+// ---------------------------------------------------------------------------
+// Конфигурация и основной тип сервиса
+// ---------------------------------------------------------------------------
+
 // ServiceConfig содержит параметры работы сервисного слоя.
 type ServiceConfig struct {
-	Storage              repository.Storage // хранилище данных
-	AccrualClient        AccrualClient      // клиент accrual-системы (интерфейс, не конкретный тип)
-	BcryptCost           int                // стоимость bcrypt (10–14)
-	AccrualQueueBuffer   int                // размер канала очереди запросов в accrual
-	DBUpdateQueueBuffer  int                // размер канала очереди обновлений в БД
-	DBUpdateBatchSize    int                // максимальный размер батча обновления БД
-	DBUpdateFlushTimeout time.Duration      // период сброса батча в БД
-	AccrualPollInterval  time.Duration      // задержка между запросами к accrual
-	AccrualRetryDelay    time.Duration      // задержка перед повторным опросом нефинального заказа
+	Storage              Storage       // хранилище данных (композиция интерфейсов)
+	AccrualClient        AccrualClient // клиент accrual-системы (интерфейс, не конкретный тип)
+	BcryptCost           int           // стоимость bcrypt (10–14)
+	AccrualQueueBuffer   int           // размер канала очереди запросов в accrual
+	DBUpdateQueueBuffer  int           // размер канала очереди обновлений в БД
+	DBUpdateBatchSize    int           // максимальный размер батча обновления БД
+	DBUpdateFlushTimeout time.Duration // период сброса батча в БД
+	AccrualPollInterval  time.Duration // задержка между запросами к accrual
+	AccrualRetryDelay    time.Duration // задержка перед повторным опросом нефинального заказа
 }
 
 // DefaultServiceConfig возвращает конфигурацию сервиса с значениями по умолчанию.
