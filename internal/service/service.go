@@ -16,17 +16,44 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// AccrualClient — интерфейс клиента внешней системы расчёта баллов.
+// Реализация — accrual.Client, но интерфейс позволяет подменять клиент
+// в тестах с помощью мока, не прибегая к конкретному типу.
+type AccrualClient interface {
+	// GetOrderAccrual запрашивает информацию о расчёте начисления для заказа.
+	GetOrderAccrual(ctx context.Context, orderNumber string) (*accrual.OrderResponse, error)
+}
+
+// OrderDTO — данные заказа для передачи из сервисного слоя в хендлер.
+// Используется вместо repository.Order, чтобы хендлеру не требовалось
+// импортировать пакет repository.
+type OrderDTO struct {
+	Number     string          // номер заказа
+	Status     string          // внутренний статус: NEW, PROCESSING, INVALID, PROCESSED
+	Accrual    decimal.Decimal // начисленные баллы (для PROCESSED)
+	UploadedAt time.Time       // время загрузки заказа в систему
+}
+
+// WithdrawalDTO — данные о списании для передачи из сервисного слоя в хендлер.
+// Используется вместо repository.Withdrawal, чтобы хендлеру не требовалось
+// импортировать пакет repository.
+type WithdrawalDTO struct {
+	OrderNumber string          // номер заказа, в счёт которого списаны баллы
+	Sum         decimal.Decimal // сумма списания
+	ProcessedAt time.Time       // время списания
+}
+
 // ServiceConfig содержит параметры работы сервисного слоя.
 type ServiceConfig struct {
 	Storage              repository.Storage // хранилище данных
-	AccrualClient        *accrual.Client    // клиент accrual-системы
-	BcryptCost           int                // стоимость bcrypt (10–14)
-	AccrualQueueBuffer   int                // размер канала очереди запросов в accrual
-	DBUpdateQueueBuffer  int                // размер канала очереди обновлений в БД
-	DBUpdateBatchSize    int                // максимальный размер батча обновления БД
-	DBUpdateFlushTimeout time.Duration      // период сброса батча в БД
-	AccrualPollInterval  time.Duration      // задержка между запросами к accrual
-	AccrualRetryDelay    time.Duration      // задержка перед повторным опросом нефинального заказа
+	AccrualClient        AccrualClient     // клиент accrual-системы (интерфейс, не конкретный тип)
+	BcryptCost           int               // стоимость bcrypt (10–14)
+	AccrualQueueBuffer   int               // размер канала очереди запросов в accrual
+	DBUpdateQueueBuffer  int               // размер канала очереди обновлений в БД
+	DBUpdateBatchSize    int               // максимальный размер батча обновления БД
+	DBUpdateFlushTimeout time.Duration     // период сброса батча в БД
+	AccrualPollInterval  time.Duration     // задержка между запросами к accrual
+	AccrualRetryDelay    time.Duration     // задержка перед повторным опросом нефинального заказа
 }
 
 // DefaultServiceConfig возвращает конфигурацию сервиса с значениями по умолчанию.
@@ -51,12 +78,18 @@ func DefaultServiceConfig() ServiceConfig {
 // что сервис останавливается. Все горутины, отправляющие данные
 // в accrualQueue, должны проверять closed перед отправкой,
 // чтобы избежать panic при записи в закрытый канал.
+//
+// Канал accrualQueue намеренно НЕ закрывается при остановке —
+// это предотвращает panic в горутинах requeueOrder (time.AfterFunc),
+// которые могут сработать после StopAccrualProcessor.
+// Вместо этого воркер выходит по сигналу closed и закрывает dbUpdateQueue,
+// что каскадно останавливает batch processor.
 type GopherMart struct {
 	config        ServiceConfig
 	accrualQueue  chan string                 // канал номеров заказов для опроса accrual
 	dbUpdateQueue chan repository.OrderUpdate // канал обновлений статусов для записи в БД
 	closed        chan struct{}               // сигнальный канал: закрыт при остановке сервиса
-	closeOnce     sync.Once                   // гарантирует однократное закрытие accrualQueue и closed
+	closeOnce     sync.Once                   // гарантирует однократное закрытие closed
 }
 
 // NewGopherMart создаёт экземпляр сервиса на основе конфигурации.
@@ -117,8 +150,9 @@ func (s *GopherMart) AuthenticateUser(ctx context.Context, login, password strin
 
 // UploadOrder принимает номер заказа от пользователя userID для расчёта начисления.
 // Создаёт запись в БД и ставит заказ в очередь на опрос accrual-системы.
-// Возвращает nil для нового заказа, ErrOrderAlreadyExists — если заказ уже загружен
-// этим пользователем, ErrOrderOwnedByAnother — если загружен другим.
+// Возвращает nil для нового заказа или ErrOrderAlreadyExists — если заказ уже загружен.
+// Хендлер различает «загружен этим пользователем» (200) и «другим» (409)
+// с помощью GetOrderByNumber.
 func (s *GopherMart) UploadOrder(ctx context.Context, orderNumber string, userID int64) error {
 	err := s.config.Storage.CreateOrder(ctx, orderNumber, userID)
 	if err != nil {
@@ -160,9 +194,24 @@ func (s *GopherMart) WithdrawPoints(ctx context.Context, userID int64, orderNo s
 }
 
 // ListUserOrders возвращает список заказов пользователя со статусами и начислениями,
-// отсортированный от новых к старым.
-func (s *GopherMart) ListUserOrders(ctx context.Context, userID int64) ([]repository.Order, error) {
-	return s.config.Storage.ListUserOrders(ctx, userID)
+// отсортированный от новых к старым. Возвращает DTO сервисного слоя,
+// а не типы repository, чтобы хендлеру не требовалось импортировать repository.
+func (s *GopherMart) ListUserOrders(ctx context.Context, userID int64) ([]OrderDTO, error) {
+	orders, err := s.config.Storage.ListUserOrders(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка получения заказов пользователя: %w", err)
+	}
+
+	result := make([]OrderDTO, len(orders))
+	for i, o := range orders {
+		result[i] = OrderDTO{
+			Number:     o.Number,
+			Status:     o.Status,
+			Accrual:    o.Accrual,
+			UploadedAt: o.UploadedAt,
+		}
+	}
+	return result, nil
 }
 
 // GetBalance возвращает текущий баланс и сумму всех списаний пользователя.
@@ -171,9 +220,23 @@ func (s *GopherMart) GetBalance(ctx context.Context, userID int64) (decimal.Deci
 }
 
 // ListWithdrawals возвращает список всех списаний пользователя,
-// отсортированный от новых к старым.
-func (s *GopherMart) ListWithdrawals(ctx context.Context, userID int64) ([]repository.Withdrawal, error) {
-	return s.config.Storage.ListWithdrawals(ctx, userID)
+// отсортированный от новых к старым. Возвращает DTO сервисного слоя,
+// а не типы repository, чтобы хендлеру не требовалось импортировать repository.
+func (s *GopherMart) ListWithdrawals(ctx context.Context, userID int64) ([]WithdrawalDTO, error) {
+	withdrawals, err := s.config.Storage.ListWithdrawals(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка получения списаний пользователя: %w", err)
+	}
+
+	result := make([]WithdrawalDTO, len(withdrawals))
+	for i, w := range withdrawals {
+		result[i] = WithdrawalDTO{
+			OrderNumber: w.OrderNumber,
+			Sum:         w.Sum,
+			ProcessedAt: w.ProcessedAt,
+		}
+	}
+	return result, nil
 }
 
 // GetOrderByNumber возвращает ID пользователя-владельца заказа по его номеру.
@@ -207,6 +270,9 @@ func (s *GopherMart) EnqueuePendingOrders(ctx context.Context) error {
 // отправка отменяется. Если очередь переполнена, логирует
 // предупреждение — заказ останется в БД со статусом NEW
 // и будет обработан при рестарте.
+//
+// Безопасна для вызова из любых горутин, включая time.AfterFunc,
+// поскольку канал accrualQueue никогда не закрывается.
 func (s *GopherMart) enqueueOrder(orderNumber string) {
 	select {
 	case <-s.closed:
@@ -222,7 +288,7 @@ func (s *GopherMart) enqueueOrder(orderNumber string) {
 // StartAccrualProcessor запускает две фоновые горутины:
 // 1. Accrual worker — опрашивает accrual-систему для заказов из accrualQueue;
 // 2. Batch processor — накапливает и пакетно записывает обновления в БД.
-// Обе горутины останавливаются при отмене контекста ctx или закрытии accrualQueue.
+// Обе горутины останавливаются при отмене контекста ctx или закрытии closed.
 // Вызывающий код должен дождаться завершения через WaitGroup.
 func (s *GopherMart) StartAccrualProcessor(ctx context.Context) {
 	var wg sync.WaitGroup
@@ -235,7 +301,7 @@ func (s *GopherMart) StartAccrualProcessor(ctx context.Context) {
 
 	go func() {
 		defer wg.Done()
-		s.runBatchProcessor(ctx)
+		s.runBatchProcessor()
 	}()
 
 	wg.Wait()
@@ -243,13 +309,17 @@ func (s *GopherMart) StartAccrualProcessor(ctx context.Context) {
 
 // StopAccrualProcessor инициирует остановку accrual-обработчика.
 // Использует sync.Once для гарантии однократного закрытия:
-// сначала закрывает сигнальный канал closed (запрещает новые отправки
-// в accrualQueue), затем закрывает сам канал accrualQueue
-// (приводит к завершению accrual worker и последующей остановке batch processor).
+// закрывает сигнальный канал closed, что запрещает новые отправки
+// в accrualQueue (все отправители проверяют closed перед записью).
+// Accrual worker видит закрытие closed, закрывает dbUpdateQueue и завершается.
+// Batch processor видит закрытие dbUpdateQueue, сбрасывает остаток батча и завершается.
+//
+// Канал accrualQueue намеренно НЕ закрывается — это предотвращает panic
+// при записи из callback-функций time.AfterFunc в requeueOrder,
+// которые могут сработать после StopAccrualProcessor.
 func (s *GopherMart) StopAccrualProcessor() {
 	s.closeOnce.Do(func() {
 		close(s.closed)
-		close(s.accrualQueue)
 	})
 }
 
@@ -259,37 +329,41 @@ func (s *GopherMart) StopAccrualProcessor() {
 //     обновление в dbUpdateQueue;
 //   - при нефинальном статусе (REGISTERED, PROCESSING) или коде 204 —
 //     повторно ставит заказ в очередь через AccrualRetryDelay;
-//   - при коде 429 — ждёт Retry-After и повторяет.
+//   - при коде 429 — ставит заказ в очередь через Retry-After.
 //
 // Между запросами выдерживается AccrualPollInterval.
+// Воркер завершается при закрытии closed или отмене ctx,
+// после чего закрывает dbUpdateQueue для каскадной остановки batch processor.
 func (s *GopherMart) runAccrualWorker(ctx context.Context) {
 	for {
 		select {
-		case orderNumber, ok := <-s.accrualQueue:
-			if !ok {
-				// Канал закрыт — завершаем работу
-				close(s.dbUpdateQueue)
-				return
-			}
+		case <-s.closed:
+			close(s.dbUpdateQueue)
+			return
+		case <-ctx.Done():
+			close(s.dbUpdateQueue)
+			return
 
+		case orderNumber := <-s.accrualQueue:
 			s.processOneOrder(ctx, orderNumber)
 
 			// Задержка между запросами к accrual
 			select {
 			case <-time.After(s.config.AccrualPollInterval):
+			case <-s.closed:
+				close(s.dbUpdateQueue)
+				return
 			case <-ctx.Done():
 				close(s.dbUpdateQueue)
 				return
 			}
-
-		case <-ctx.Done():
-			close(s.dbUpdateQueue)
-			return
 		}
 	}
 }
 
 // processOneOrder опрашивает accrual-систему по одному заказу и маршрутизирует ответ.
+// При ошибке или нефинальном статусе заказ переотправляется в очередь через
+// requeueOrder с соответствующей задержкой.
 func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string) {
 	resp, err := s.config.AccrualClient.GetOrderAccrual(ctx, orderNumber)
 	if err != nil {
@@ -298,13 +372,8 @@ func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string) {
 			logger.Log.Info("превышен лимит запросов к accrual-системе",
 				zap.String("заказ", orderNumber),
 				zap.Int("повтор_через_сек", etmr.RetryAfter))
-			// Ждём Retry-After и повторяем
-			select {
-			case <-time.After(time.Duration(etmr.RetryAfter) * time.Second):
-				s.requeueOrder(ctx, orderNumber)
-			case <-ctx.Done():
-				return
-			}
+			// Ставим в очередь с задержкой из Retry-After
+			s.requeueOrder(orderNumber, time.Duration(etmr.RetryAfter)*time.Second)
 			return
 		}
 
@@ -312,14 +381,14 @@ func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string) {
 		if errors.As(err, &enr) {
 			logger.Log.Debug("заказ не зарегистрирован в accrual-системе",
 				zap.String("заказ", orderNumber))
-			s.requeueOrder(ctx, orderNumber)
+			s.requeueOrder(orderNumber, s.config.AccrualRetryDelay)
 			return
 		}
 
 		logger.Log.Error("ошибка запроса к accrual-системе",
 			zap.String("заказ", orderNumber),
 			zap.Error(err))
-		s.requeueOrder(ctx, orderNumber)
+		s.requeueOrder(orderNumber, s.config.AccrualRetryDelay)
 		return
 	}
 
@@ -352,33 +421,34 @@ func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string) {
 
 	// Если статус нефинальный — переотправляем в accrual-очередь
 	if internalStatus == "PROCESSING" {
-		s.requeueOrder(ctx, orderNumber)
+		s.requeueOrder(orderNumber, s.config.AccrualRetryDelay)
 	}
 }
 
-// requeueOrder повторно ставит заказ в очередь accrual после задержки AccrualRetryDelay.
-// Запускает переотправку в отдельной горутине, чтобы не блокировать worker.
-// Проверяет сигнальный канал closed, чтобы избежать panic
-// при записи в закрытый accrualQueue во время остановки сервиса.
-func (s *GopherMart) requeueOrder(ctx context.Context, orderNumber string) {
-	go func() {
-		select {
-		case <-time.After(s.config.AccrualRetryDelay):
-			// Проверяем, не остановлен ли сервис, перед отправкой.
-			// Это предотвращает panic: send on closed channel.
-			s.enqueueOrder(orderNumber)
-		case <-s.closed:
-			// сервис останавливается — не отправляем
-		case <-ctx.Done():
-			return
-		}
-	}()
+// requeueOrder ставит заказ в очередь accrual после указанной задержки.
+// Использует time.AfterFunc — таймер из стандартной библиотеки,
+// который запускает callback в отдельной горутине по истечении delay.
+// При срабатывании enqueueOrder проверяет сигнальный канал closed
+// и безопасно отменяет отправку, если сервис останавливается.
+//
+// В отличие от ручной горутины с time.After, time.AfterFunc эффективнее:
+// использует внутренний таймер-колесо рантайма и не требует
+// отдельного select на каждый заказ.
+func (s *GopherMart) requeueOrder(orderNumber string, delay time.Duration) {
+	time.AfterFunc(delay, func() {
+		s.enqueueOrder(orderNumber)
+	})
 }
 
 // runBatchProcessor читает обновления из dbUpdateQueue, накапливает их в батч
 // и пакетно записывает в БД при достижении DBUpdateBatchSize или по таймеру
 // DBUpdateFlushTimeout. Паттерн заимствован из url-shortener (fan-in).
-func (s *GopherMart) runBatchProcessor(ctx context.Context) {
+//
+// Процессор завершается ТОЛЬКО при закрытии dbUpdateQueue (воркером),
+// после чего сбрасывает оставшийся батч и ждёт завершения всех горутин записи.
+// Использование отдельного контекста с таймаутом для flush гарантирует,
+// что финальный батч будет записан даже если основной контекст уже отменён.
+func (s *GopherMart) runBatchProcessor() {
 	batch := make([]repository.OrderUpdate, 0, s.config.DBUpdateBatchSize)
 	ticker := time.NewTicker(s.config.DBUpdateFlushTimeout)
 	defer ticker.Stop()
@@ -387,6 +457,9 @@ func (s *GopherMart) runBatchProcessor(ctx context.Context) {
 
 	// flush сбрасывает накопленный батч в БД в отдельной горутине.
 	// Копирует батч, чтобы не блокировать накопление следующих элементов.
+	// Использует свежий контекст с таймаутом 10 секунд — это гарантирует,
+	// что финальный flush при остановке сработает даже если основной
+	// контекст сервиса уже отменён.
 	flush := func() {
 		if len(batch) == 0 {
 			return
@@ -398,7 +471,9 @@ func (s *GopherMart) runBatchProcessor(ctx context.Context) {
 		storageWg.Add(1)
 		go func(b []repository.OrderUpdate) {
 			defer storageWg.Done()
-			if err := s.config.Storage.BatchUpdateOrders(ctx, b); err != nil {
+			flushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := s.config.Storage.BatchUpdateOrders(flushCtx, b); err != nil {
 				logger.Log.Error("ошибка пакетного обновления заказов", zap.Error(err))
 			}
 		}(batchToStore)
@@ -408,7 +483,7 @@ func (s *GopherMart) runBatchProcessor(ctx context.Context) {
 		select {
 		case update, ok := <-s.dbUpdateQueue:
 			if !ok {
-				// Канал закрыт — финальный сброс и выход
+				// Канал закрыт воркером — финальный сброс и выход
 				flush()
 				storageWg.Wait()
 				return
@@ -421,11 +496,6 @@ func (s *GopherMart) runBatchProcessor(ctx context.Context) {
 
 		case <-ticker.C:
 			flush()
-
-		case <-ctx.Done():
-			flush()
-			storageWg.Wait()
-			return
 		}
 	}
 }

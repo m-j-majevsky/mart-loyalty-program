@@ -120,7 +120,7 @@ func main() {
 
 	// Останавливаем accrual-обработчик
 	svc.StopAccrualProcessor()
-	logger.Log.Info("канал очереди accrual закрыт", event)
+	logger.Log.Info("сигнал остановки accrual-обработчика отправлен", event)
 
 	// Дожидаемся завершения фоновых горутин
 	backgroundWg.Wait()

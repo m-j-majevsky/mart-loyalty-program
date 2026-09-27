@@ -187,10 +187,11 @@ func (s *pgStorage) WithdrawPoints(ctx context.Context, userID int64, orderNo st
 		return fmt.Errorf("ошибка списания баллов: %w", err)
 	}
 
-	// Шаг 3: вставляем заказ
+	// Шаг 3: вставляем заказ (accrual не указываем — используется DEFAULT 0,
+	// аналогично CreateOrder)
 	_, err = tx.Exec(ctx, `
-		INSERT INTO orders (number, user_id, status, accrual)
-		VALUES ($1, $2, 'NEW', 0)
+		INSERT INTO orders (number, user_id, status)
+		VALUES ($1, $2, 'NEW')
 	`, orderNo, userID)
 	if err != nil {
 		var pgErr *pgconn.PgError

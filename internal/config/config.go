@@ -2,6 +2,7 @@ package config
 
 import (
 	"flag"
+	"fmt"
 	"os"
 	"time"
 )
@@ -20,7 +21,8 @@ type ApplicationConfig struct {
 
 // LoadApplicationConfig загружает конфигурацию из флагов командной строки
 // и переменных окружения. Переменные окружения имеют приоритет над флагами.
-// Возвращает заполненную структуру ApplicationConfig или ошибку.
+// Возвращает заполненную структуру ApplicationConfig или ошибку,
+// если обязательные параметры не заданы.
 func LoadApplicationConfig() (ApplicationConfig, error) {
 	cfg := ApplicationConfig{}
 
@@ -50,6 +52,14 @@ func LoadApplicationConfig() (ApplicationConfig, error) {
 	cfg.CookieAuthName = "gophermart_auth"
 	cfg.CookieAuthTTL = 24 * time.Hour
 	cfg.ShutdownTimeout = 10 * time.Second
+
+	// Валидация обязательных параметров
+	if cfg.DatabaseURI == "" {
+		return cfg, fmt.Errorf("DATABASE_URI не задан (используйте флаг -d или переменную окружения DATABASE_URI)")
+	}
+	if cfg.AccrualSystemAddress == "" {
+		return cfg, fmt.Errorf("ACCRUAL_SYSTEM_ADDRESS не задан (используйте флаг -r или переменную окружения ACCRUAL_SYSTEM_ADDRESS)")
+	}
 
 	return cfg, nil
 }

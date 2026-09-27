@@ -13,7 +13,6 @@ import (
 	"github.com/m-j-majevsky/gophermart/internal/config"
 	"github.com/m-j-majevsky/gophermart/internal/logger"
 	"github.com/m-j-majevsky/gophermart/internal/luhn"
-	"github.com/m-j-majevsky/gophermart/internal/repository"
 	"github.com/m-j-majevsky/gophermart/internal/service"
 	"github.com/shopspring/decimal"
 	"go.uber.org/zap"
@@ -29,9 +28,9 @@ type GopherMartService interface {
 	AuthenticateUser(ctx context.Context, login, password string) (int64, error)
 	UploadOrder(ctx context.Context, orderNumber string, userID int64) error
 	WithdrawPoints(ctx context.Context, userID int64, orderNo string, sum decimal.Decimal) error
-	ListUserOrders(ctx context.Context, userID int64) ([]repository.Order, error)
+	ListUserOrders(ctx context.Context, userID int64) ([]service.OrderDTO, error)
 	GetBalance(ctx context.Context, userID int64) (decimal.Decimal, decimal.Decimal, error)
-	ListWithdrawals(ctx context.Context, userID int64) ([]repository.Withdrawal, error)
+	ListWithdrawals(ctx context.Context, userID int64) ([]service.WithdrawalDTO, error)
 	GetOrderByNumber(ctx context.Context, number string) (int64, error)
 	Ping(ctx context.Context) error
 }
