@@ -13,7 +13,7 @@ handler → service → repository → pgx → PostgreSQL
 
 1. **handler** — HTTP-хендлеры на chi. Не импортирует `repository` — сервис возвращает `OrderDTO` и `WithdrawalDTO`. Проверяет только sentinel-ошибки из `service`.
 2. **service** — бизнес-логика, bcrypt, каналы, воркеры. Транслирует ошибки `repository` в собственные sentinel-ошибки. Обращается к accrual-системе через интерфейс `AccrualClient`, что позволит подменять моком в тестах.
-3. **repository** — хранилище на pgx. Использует приватный интерфейс `dbtx` (реализуется `*pgxpool.Pool` и `pgx.Tx`) — для unit-тестов без живой БД.
+3. **repository** — хранилище на pgx. Использует приватный интерфейс `dbtx` (реализуется `*pgxpool.Pool`) — для unit-тестов без живой БД. Внутри транзакций код работает с `pgx.Tx` напрямую.
 4. **accrual.Client** — HTTP-клиент с таймаутом 5 секунд, парсинг `Retry-After` при 429.
 
 ---
@@ -235,11 +235,12 @@ case <-ctx.Done():
 
 Цепочка остановки:
 
-1. `StopAccrualProcessor()` закрывает сигнальный канал `closed` через `sync.Once`.
-2. `enqueueOrder` и callback-функции `time.AfterFunc` в `requeueOrder` видят `closed` — новые отправки отменяются.
-3. `runAccrualWorker` выходит по `case <-s.closed` или `case <-ctx.Done()`, и отложенный вызов `close(s.dbUpdateQueue)` закрывает канал.
-4. `runBatchProcessor` выходит по `case !ok` (канал закрыт), делает финальный `flush`.
-5. `main.go` ждёт `backgroundWg`.
+1. При получении сигнала ОС отменяется контекст `ctx`. Затем `server.Shutdown` дожидается завершения активных HTTP-запросов (до 10 секунд).
+2. `StopAccrualProcessor()` закрывает сигнальный канал `closed` через `sync.Once` — это страховка для горутин, которые ещё не увидели отмену контекста.
+3. `enqueueOrder` и callback-функции `time.AfterFunc` в `requeueOrder` видят `closed` — новые отправки отменяются.
+4. `runAccrualWorker` выходит по `case <-s.closed` или `case <-ctx.Done()`, и отложенный вызов `close(s.dbUpdateQueue)` закрывает канал.
+5. `runBatchProcessor` выходит по `case !ok` (канал закрыт), делает финальный `flush`.
+6. `main.go` ждёт `backgroundWg`.
 
 **Канал `accrualQueue` намеренно не закрывается** при остановке. Это предотвращает panic в callback-функциях `time.AfterFunc` из `requeueOrder`, которые могут сработать после `StopAccrualProcessor` и попытаться записать в закрытый канал. Вместо этого воркер выходит по сигналу `closed` и закрывает `dbUpdateQueue`, что каскадно останавливает batch processor.
 

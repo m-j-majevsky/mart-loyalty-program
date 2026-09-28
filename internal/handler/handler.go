@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -24,6 +25,10 @@ const procTimeout = 5 * time.Second
 // maxOrderNumberLen — ограничение на размер тела при загрузке номера заказа.
 // Номер заказа — короткая строка из цифр, большие тела отсекаются.
 const maxOrderNumberLen = 64
+
+// maxJSONBodyLen — ограничение на размер JSON-тела для хендлеров register, login,
+// withdraw. Защищает от произвольно больших тел запроса.
+const maxJSONBodyLen = 4096
 
 // UserAuthService — регистрация и аутентификация пользователей.
 type UserAuthService interface {
@@ -147,6 +152,9 @@ func getUserIDInt64(r *http.Request) (int64, error) {
 // Принимает JSON с полями login и password. При успехе устанавливает
 // cookie с JWT-токеном и возвращает 200. Если логин занят — 409.
 func (rt *Router) register(w http.ResponseWriter, r *http.Request) {
+	// Ограничиваем размер JSON-тела для защиты от произвольно больших запросов.
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyLen)
+
 	var req struct {
 		Login    string `json:"login"`
 		Password string `json:"password"`
@@ -189,6 +197,9 @@ func (rt *Router) register(w http.ResponseWriter, r *http.Request) {
 // Принимает JSON с полями login и password. При успехе устанавливает
 // cookie с JWT-токеном и возвращает 200. При неверных данных — 401.
 func (rt *Router) login(w http.ResponseWriter, r *http.Request) {
+	// Ограничиваем размер JSON-тела для защиты от произвольно больших запросов.
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyLen)
+
 	var req struct {
 		Login    string `json:"login"`
 		Password string `json:"password"`
@@ -249,7 +260,9 @@ func (rt *Router) uploadOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	orderNumber := string(body)
+	// Обрезаем пробелы и символы переноса строки — например, при отправке через curl
+	// тело может содержать trailing newline, из-за которого проверка Луна не пройдёт.
+	orderNumber := strings.TrimSpace(string(body))
 	if orderNumber == "" {
 		http.Error(w, "номер заказа не передан", http.StatusBadRequest)
 		return
@@ -391,6 +404,9 @@ func (rt *Router) withdraw(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 		return
 	}
+
+	// Ограничиваем размер JSON-тела для защиты от произвольно больших запросов.
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyLen)
 
 	var req struct {
 		Order string          `json:"order"`
