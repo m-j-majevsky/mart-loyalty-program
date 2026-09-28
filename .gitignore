@@ -25,3 +25,4 @@ vendor/
 
 # The rest
 test_gophermart.sh
+test_gophermart_out.txt
