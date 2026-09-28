@@ -164,7 +164,7 @@ handler → service → repository → pgx → PostgreSQL
 
 1. `accrualQueue` (буфер 2048) — канал номеров заказов для опроса accrual-системы.
 2. Accrual Worker — горутина, читающая из `accrualQueue` и опрашивающая accrual-систему.
-3. `dbUpdateQueue` (буфер 1024) — канал обновлений статусов и начислений для записи в БД.
+3. `dbUpdateQueue` (буфер 512) — канал обновлений статусов и начислений для записи в БД.
 4. Batch Processor — горутина, накапливающая обновления и пакетно записывающая их в БД.
 
 ### `accrualQueue` — очередь запросов к accrual-системе
@@ -186,7 +186,7 @@ handler → service → repository → pgx → PostgreSQL
 Воркер читает номера заказов из `accrualQueue` и опрашивает accrual-систему через `AccrualClient.GetOrderAccrual`. Для каждого заказа вызывается `processOneOrder`, который маршрутизирует ответ:
 
 1. **Ответ с кодом 200, статус INVALID или PROCESSED** — отправка `OrderUpdate` в `dbUpdateQueue` (достигнут финальный статус).
-2. **Ответ с кодом 200, статус REGISTERED или PROCESSING** — отправка `OrderUpdate` в `dbUpdateQueue` (обновить статус на `PROCESSING`), заказ переотправляется в `accrualQueue` через `AccrualRetryDelay` (3 секунды) методом `requeueOrder`.
+2. **Ответ с кодом 200, статус REGISTERED или PROCESSING** — отправка `OrderUpdate` в `dbUpdateQueue` (обновить статус на `PROCESSING`), заказ переотправляется в `accrualQueue` через `AccrualRetryDelay` (1 секунда) методом `requeueOrder`.
 3. **Ответ с кодом 204 (заказ не зарегистрирован в accrual-системе)** — заказ переотправляется в `accrualQueue` через `AccrualRetryDelay`.
 4. **Ответ с кодом 429 от accrual-системы (превышен лимит запросов)** — заказ переотправляется в `accrualQueue` через задержку из заголовка `Retry-After`, и метод `processOneOrder` возвращает ту же задержку (см. ниже замечание об обработке 429).
 5. **Ошибка сети** — заказ переотправляется в `accrualQueue` через `AccrualRetryDelay`.
@@ -212,7 +212,7 @@ case <-ctx.Done():
 
 ### `dbUpdateQueue` — очередь обновлений БД
 
-Канал `chan repository.OrderUpdate` размером 1024. Источник — только accrual-воркер. Воркер закрывает этот канал при выходе через `defer close(s.dbUpdateQueue)`, что каскадно останавливает batch processor.
+Канал `chan repository.OrderUpdate` размером 512. Источник — только accrual-воркер. Воркер закрывает этот канал при выходе через `defer close(s.dbUpdateQueue)`, что каскадно останавливает batch processor.
 
 Отправка обновлений в `dbUpdateQueue` — блокирующая. Если очередь переполнена (БД не справляется с записью), accrual-воркер приостанавливается до освобождения места. Это создаёт естественный backpressure: нет смысла опрашивать accrual-систему быстрее, чем результат можно записать. При остановке сервиса каналы `s.closed` и `ctx.Done()` мгновенно разблокируют отправку через `select`.
 
@@ -220,8 +220,8 @@ case <-ctx.Done():
 
 Накапливает обновления в слайс и сбрасывает в БД двумя триггерами:
 
-1. Размер батча достиг `DBUpdateBatchSize` (512 элементов);
-2. Сработал `time.Ticker` каждые `DBUpdateFlushTimeout` (500 мс).
+1. Размер батча достиг `DBUpdateBatchSize` (128 элементов);
+2. Сработал `time.Ticker` каждые `DBUpdateFlushTimeout` (200 мс).
 
 Сброс в БД выполняется **синхронно** (без отдельной горутины). Это гарантирует порядок записи: обновления одного заказа не смогут прийти в БД в произвольном порядке. Если БД медленно отвечает, основной цикл блокируется на `flush` — это создаёт естественный backpressure для accrual-воркера (через переполнение `dbUpdateQueue`).
 

@@ -146,11 +146,11 @@ func DefaultServiceConfig() ServiceConfig {
 	return ServiceConfig{
 		BcryptCost:           12,
 		AccrualQueueBuffer:   2048,
-		DBUpdateQueueBuffer:  1024,
-		DBUpdateBatchSize:    512,
-		DBUpdateFlushTimeout: 500 * time.Millisecond,
+		DBUpdateQueueBuffer:  512,
+		DBUpdateBatchSize:    128,
+		DBUpdateFlushTimeout: 200 * time.Millisecond,
 		AccrualPollInterval:  100 * time.Millisecond,
-		AccrualRetryDelay:    3 * time.Second,
+		AccrualRetryDelay:    1 * time.Second,
 	}
 }
 
