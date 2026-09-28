@@ -3,19 +3,11 @@ package service
 import "errors"
 
 // Ошибки сервисного слоя.
-// Каждая ошибка — sentinel-значение, используемое хендлером
-// для выбора HTTP-кода ответа без импорта пакета repository.
+// Каждая ошибка — sentinel-значение, используемое хендлером для выбора HTTP-кода ответа.
 
 var (
-	// ErrLoginTaken — логин уже занят другим пользователем.
-	ErrLoginTaken = errors.New("логин уже занят")
-
-	// ErrInvalidCredentials — неверная пара логин/пароль.
+	ErrLoginTaken         = errors.New("логин уже занят")
 	ErrInvalidCredentials = errors.New("неверная пара логин/пароль")
-
-	// ErrInsufficientFunds — недостаточно баллов для списания.
-	ErrInsufficientFunds = errors.New("недостаточно баллов на счёте")
-
-	// ErrOrderAlreadyExists — заказ уже зарегистрирован в системе.
+	ErrInsufficientFunds  = errors.New("недостаточно баллов на счёте")
 	ErrOrderAlreadyExists = errors.New("заказ уже зарегистрирован")
 )

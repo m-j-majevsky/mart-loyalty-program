@@ -91,12 +91,10 @@ func (c *Client) GetOrderAccrual(ctx context.Context, orderNumber string) (*Orde
 // ErrNotRegistered означает, что заказ не зарегистрирован в accrual-системе.
 type ErrNotRegistered struct{}
 
-// Error возвращает текстовое описание ошибки.
 func (e *ErrNotRegistered) Error() string {
 	return "заказ не зарегистрирован в accrual-системе"
 }
 
-// NewErrNotRegistered конструирует ошибку ErrNotRegistered.
 func NewErrNotRegistered() error {
 	return &ErrNotRegistered{}
 }
@@ -107,13 +105,10 @@ type ErrTooManyRequests struct {
 	RetryAfter int
 }
 
-// Error возвращает текстовое описание ошибки.
 func (e *ErrTooManyRequests) Error() string {
 	return fmt.Sprintf("превышен лимит запросов к accrual-системе, повтор через %d секунд", e.RetryAfter)
 }
 
-// NewErrTooManyRequests конструирует ошибку ErrTooManyRequests
-// с указанием задержки retryAfterInSeconds.
 func NewErrTooManyRequests(retryAfterInSeconds int) error {
 	return &ErrTooManyRequests{RetryAfter: retryAfterInSeconds}
 }

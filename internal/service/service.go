@@ -63,14 +63,17 @@ type OrderStore interface {
 // WithdrawalStore — операции со списаниями: списание баллов и листинг.
 type WithdrawalStore interface {
 	// WithdrawPoints списывает баллы с баланса пользователя в счёт заказа orderNo.
-	// Выполняется в одной транзакции: блокировка пользователя, проверка баланса,
-	// списание, создание заказа и записи о списании.
+	// Выполняет в одной транзакции следущие операции:
+	// блокировка пользователя,
+	// проверка баланса,
+	// списание,
+	// создание заказа и записи о списании.
 	// Возвращает ErrInsufficientFunds, если баллов недостаточно,
 	// или ErrOrderAlreadyExists, если заказ уже зарегистрирован.
 	WithdrawPoints(ctx context.Context, userID int64, orderNo string, sum decimal.Decimal) error
 
-	// ListWithdrawals возвращает все списания пользователя, отсортированные
-	// от самых новых к самым старым по времени списания.
+	// ListWithdrawals возвращает все списания пользователя,
+	// отсортированные от самых новых к самым старым по времени списания.
 	ListWithdrawals(ctx context.Context, userID int64) ([]repository.Withdrawal, error)
 }
 
@@ -82,7 +85,6 @@ type Pinger interface {
 
 // Storage — композиция всех интерфейсов хранилища.
 // Используется в ServiceConfig для передачи хранилища в сервис.
-// Реализация (repository.pgStorage) удовлетворяет этому интерфейсу неявно.
 type Storage interface {
 	UserStore
 	OrderStore
@@ -95,8 +97,8 @@ type Storage interface {
 // ---------------------------------------------------------------------------
 
 // AccrualClient — интерфейс клиента внешней системы расчёта баллов.
-// Реализация — accrual.Client, но интерфейс позволяет подменять клиент
-// в тестах с помощью мока, не прибегая к конкретному типу.
+// Введён для мокирования в тестах.
+// Реализация — accrual.Client.
 type AccrualClient interface {
 	// GetOrderAccrual запрашивает информацию о расчёте начисления для заказа.
 	GetOrderAccrual(ctx context.Context, orderNumber string) (*accrual.OrderResponse, error)
@@ -128,14 +130,14 @@ type WithdrawalDTO struct {
 // ServiceConfig содержит параметры работы сервисного слоя.
 type ServiceConfig struct {
 	Storage              Storage       // хранилище данных (композиция интерфейсов)
-	AccrualClient        AccrualClient // клиент accrual-системы (интерфейс, не конкретный тип)
+	AccrualClient        AccrualClient // клиент accrual-системы
 	BcryptCost           int           // стоимость bcrypt (10–14)
 	AccrualQueueBuffer   int           // размер канала очереди запросов в accrual
 	DBUpdateQueueBuffer  int           // размер канала очереди обновлений в БД
 	DBUpdateBatchSize    int           // максимальный размер батча обновления БД
 	DBUpdateFlushTimeout time.Duration // период сброса батча в БД
 	AccrualPollInterval  time.Duration // задержка между запросами к accrual
-	AccrualRetryDelay    time.Duration // задержка перед повторным опросом нефинального заказа
+	AccrualRetryDelay    time.Duration // задержка перед повторным опросом accrual о заказе в нефинальном статусе
 }
 
 // DefaultServiceConfig возвращает конфигурацию сервиса с значениями по умолчанию.
@@ -143,11 +145,11 @@ type ServiceConfig struct {
 func DefaultServiceConfig() ServiceConfig {
 	return ServiceConfig{
 		BcryptCost:           12,
-		AccrualQueueBuffer:   1000,
-		DBUpdateQueueBuffer:  2000,
-		DBUpdateBatchSize:    1000,
-		DBUpdateFlushTimeout: 100 * time.Millisecond,
-		AccrualPollInterval:  250 * time.Millisecond,
+		AccrualQueueBuffer:   2048,
+		DBUpdateQueueBuffer:  1024,
+		DBUpdateBatchSize:    512,
+		DBUpdateFlushTimeout: 500 * time.Millisecond,
+		AccrualPollInterval:  100 * time.Millisecond,
 		AccrualRetryDelay:    3 * time.Second,
 	}
 }
@@ -175,10 +177,14 @@ type GopherMart struct {
 }
 
 // NewGopherMart создаёт экземпляр сервиса на основе конфигурации.
-// Возвращает ошибку, если не задано хранилище.
+// Возвращает ошибку, если не заданы хранилище или клиент accrual-системы.
 func NewGopherMart(cfg ServiceConfig) (*GopherMart, error) {
 	if cfg.Storage == nil {
 		return nil, fmt.Errorf("ошибка конфигурации: не задано хранилище")
+	}
+
+	if cfg.AccrualClient == nil {
+		return nil, fmt.Errorf("ошибка конфигурации: не задан клиент accrual-системы")
 	}
 
 	return &GopherMart{
@@ -233,8 +239,6 @@ func (s *GopherMart) AuthenticateUser(ctx context.Context, login, password strin
 // UploadOrder принимает номер заказа от пользователя userID для расчёта начисления.
 // Создаёт запись в БД и ставит заказ в очередь на опрос accrual-системы.
 // Возвращает nil для нового заказа или ErrOrderAlreadyExists — если заказ уже загружен.
-// Хендлер различает «загружен этим пользователем» (200) и «другим» (409)
-// с помощью GetOrderByNumber.
 func (s *GopherMart) UploadOrder(ctx context.Context, orderNumber string, userID int64) error {
 	err := s.config.Storage.CreateOrder(ctx, orderNumber, userID)
 	if err != nil {
@@ -248,13 +252,15 @@ func (s *GopherMart) UploadOrder(ctx context.Context, orderNumber string, userID
 	}
 
 	s.enqueueOrder(orderNumber)
+
 	return nil
 }
 
 // WithdrawPoints списывает баллы с баланса пользователя в счёт нового заказа.
 // Проверяет баланс и создаёт заказ в одной транзакции (через хранилище).
-// Заказ также ставится в очередь на опрос accrual-системы.
-// Возвращает ErrInsufficientFunds при нехватке баллов,
+// Заказ также ставится в очередь на опрос accrual-системы.                    <= TODO: проверить (см. ниже)
+// Возвращает:
+// ErrInsufficientFunds при нехватке баллов,
 // ErrOrderAlreadyExists — если заказ уже зарегистрирован.
 func (s *GopherMart) WithdrawPoints(ctx context.Context, userID int64, orderNo string, sum decimal.Decimal) error {
 	err := s.config.Storage.WithdrawPoints(ctx, userID, orderNo, sum)
@@ -271,13 +277,16 @@ func (s *GopherMart) WithdrawPoints(ctx context.Context, userID int64, orderNo s
 		return fmt.Errorf("ошибка списания баллов: %w", err)
 	}
 
+	// TODO:
+	// Убедиться, что в данном случае нужно ставить вызов в очередь.
+	// Возможно, не нужно, поскольку начисление за заказ, в рамках которого баллы списываются, сомнительно.
 	s.enqueueOrder(orderNo)
+
 	return nil
 }
 
 // ListUserOrders возвращает список заказов пользователя со статусами и начислениями,
-// отсортированный от новых к старым. Возвращает DTO сервисного слоя,
-// а не типы repository, чтобы хендлеру не требовалось импортировать repository.
+// отсортированный от новых к старым.
 func (s *GopherMart) ListUserOrders(ctx context.Context, userID int64) ([]OrderDTO, error) {
 	orders, err := s.config.Storage.ListUserOrders(ctx, userID)
 	if err != nil {
@@ -302,8 +311,7 @@ func (s *GopherMart) GetBalance(ctx context.Context, userID int64) (decimal.Deci
 }
 
 // ListWithdrawals возвращает список всех списаний пользователя,
-// отсортированный от новых к старым. Возвращает DTO сервисного слоя,
-// а не типы repository, чтобы хендлеру не требовалось импортировать repository.
+// отсортированный от новых к старым.
 func (s *GopherMart) ListWithdrawals(ctx context.Context, userID int64) ([]WithdrawalDTO, error) {
 	withdrawals, err := s.config.Storage.ListWithdrawals(ctx, userID)
 	if err != nil {
@@ -322,15 +330,15 @@ func (s *GopherMart) ListWithdrawals(ctx context.Context, userID int64) ([]Withd
 }
 
 // GetOrderByNumber возвращает ID пользователя-владельца заказа по его номеру.
-// Делегирует вызов хранилищу. Используется хендлером для различения
-// ситуаций «заказ загружен этим пользователем» (200) и «другим» (409).
+// Используется хендлером загрузки номера заказа для различения ситуаций
+// «заказ загружен этим пользователем» (200) и «другим» (409).
 func (s *GopherMart) GetOrderByNumber(ctx context.Context, number string) (int64, error) {
 	return s.config.Storage.GetOrderByNumber(ctx, number)
 }
 
 // EnqueuePendingOrders выбирает из БД все заказы в статусах NEW и PROCESSING
-// и ставит их в очередь на опрос accrual-системы. Вызывается при запуске
-// сервиса для восстановления обработки после перезапуска.
+// и ставит их в очередь на опрос accrual-системы. Вызывается при запуске сервиса
+// для восстановления обработки после перезапуска.
 func (s *GopherMart) EnqueuePendingOrders(ctx context.Context) error {
 	numbers, err := s.config.Storage.ListPendingOrderNumbers(ctx)
 	if err != nil {
@@ -467,8 +475,7 @@ func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string) ti
 			logger.Log.Info("превышен лимит запросов к accrual-системе, приостанавливаем воркер",
 				zap.String("заказ", orderNumber),
 				zap.Int("повтор_через_сек", etmr.RetryAfter))
-			// Ставим в очередь с задержкой из Retry-After
-			s.requeueOrder(orderNumber, time.Duration(etmr.RetryAfter)*time.Second)
+			s.requeueOrder(orderNumber, s.config.AccrualRetryDelay)
 			// Возвращаем задержку, чтобы воркер полностью остановился на Retry-After
 			return time.Duration(etmr.RetryAfter) * time.Second
 		}
@@ -488,7 +495,7 @@ func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string) ti
 		return 0
 	}
 
-	// Маппинг статусов accrual → внутренние
+	// Маппинг статусов accrual на внутренние
 	var internalStatus string
 	switch resp.Status {
 	case "INVALID":
@@ -507,11 +514,21 @@ func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string) ti
 		Accrual: resp.Accrual,
 	}
 
-	// Отправляем в очередь обновления БД
+	// Отправляем обновление в очередь записи в БД.
+	//
+	// Используется блокирующая отправка через select с проверкой канала closed.
+	// Если dbUpdateQueue переполнен (БД не справляется с записью), accrual-воркер
+	// приостановится и будет ждать, пока в очереди не освободится место. Это
+	// создаёт естественный backpressure: нет смысла опрашивать accrual-систему
+	// быстрее, чем мы можем записать результат в БД.
+	//
+	// При shutdown канал closed мгновенно разблокирует select, воркер корректно завершится
+	// и закроет dbUpdateQueue. Обновление гарантированно доставляется в очередь
+	// или  корректно отбрасывается при остановке сервиса (startup-sweep подхватит при рестарте).
 	select {
 	case s.dbUpdateQueue <- update:
-	default:
-		logger.Log.Warn("очередь обновлений БД переполнена, обновление потеряно",
+	case <-s.closed:
+		logger.Log.Info("сервис останавливается, обновление заказа не записано в БД",
 			zap.String("заказ", orderNumber))
 	}
 
@@ -524,14 +541,10 @@ func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string) ti
 }
 
 // requeueOrder ставит заказ в очередь accrual после указанной задержки.
-// Использует time.AfterFunc — таймер из стандартной библиотеки,
-// который запускает callback в отдельной горутине по истечении delay.
+// Использует time.AfterFunc — таймер из стандартной библиотеки
+// для запуска callback в отдельной горутине по истечении delay.
 // При срабатывании enqueueOrder проверяет сигнальный канал closed
 // и безопасно отменяет отправку, если сервис останавливается.
-//
-// В отличие от ручной горутины с time.After, time.AfterFunc эффективнее:
-// использует внутренний таймер-колесо рантайма и не требует
-// отдельного select на каждый заказ.
 func (s *GopherMart) requeueOrder(orderNumber string, delay time.Duration) {
 	time.AfterFunc(delay, func() {
 		s.enqueueOrder(orderNumber)
