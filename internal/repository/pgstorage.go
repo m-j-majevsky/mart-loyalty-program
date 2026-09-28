@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/shopspring/decimal"
@@ -45,7 +46,7 @@ func (s *pgStorage) CreateUser(ctx context.Context, login, passwordHash string) 
 	err := s.db.QueryRow(ctx, q, login, passwordHash).Scan(&id)
 	if err != nil {
 		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
 			return 0, NewErrLoginTaken(login)
 		}
 		return 0, fmt.Errorf("ошибка создания пользователя: %w", err)
@@ -82,7 +83,7 @@ func (s *pgStorage) CreateOrder(ctx context.Context, number string, userID int64
 	_, err := s.db.Exec(ctx, q, number, userID)
 	if err != nil {
 		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
 			return NewErrOrderAlreadyExists(number)
 		}
 		return fmt.Errorf("ошибка создания заказа: %w", err)
@@ -192,7 +193,7 @@ func (s *pgStorage) WithdrawPoints(ctx context.Context, userID int64, orderNo st
     `, orderNo, userID)
 	if err != nil {
 		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
 			return NewErrOrderAlreadyExists(orderNo)
 		}
 		return fmt.Errorf("ошибка создания заказа при списании: %w", err)

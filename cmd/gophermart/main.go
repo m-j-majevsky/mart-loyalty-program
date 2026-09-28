@@ -94,13 +94,24 @@ func main() {
 		Handler: rt,
 	}
 
-	// Запускаем сервер в фоновой горутине
-	go listenAndServe(server)
+	// Запускаем сервер в фоновой горутине.
+	// Канал errCh сигнализирует main о фатальной ошибке запуска
+	// (например, порт уже занят).
+	errCh := make(chan error, 1)
+	go func() {
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		}
+	}()
 
 	logger.Log.Info("сервис запущен", zap.String("address", cfg.RunAddress))
 
-	// Блокируем main до получения сигнала
-	<-ctx.Done()
+	// Блокируем main до получения сигнала ОС или фатальной ошибки сервера
+	select {
+	case <-ctx.Done():
+	case err := <-errCh:
+		logger.Log.Fatal("ошибка HTTP-сервера", zap.Error(err))
+	}
 
 	event := zap.String("event", "shutdown")
 	logger.Log.Info("получен сигнал завершения", zap.String("cause", context.Cause(ctx).Error()), event)
@@ -142,12 +153,4 @@ func createPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	}
 
 	return pool, nil
-}
-
-// listenAndServe запускает HTTP-сервер в фоновой горутине.
-// Логирует ошибку, если она не является ErrServerClosed (нормальный shutdown).
-func listenAndServe(server *http.Server) {
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		logger.Log.Error("ошибка HTTP-сервера", zap.Error(err))
-	}
 }

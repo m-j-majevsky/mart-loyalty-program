@@ -410,8 +410,8 @@ func (s *GopherMart) StopAccrualProcessor() {
 // runAccrualWorker читает номера заказов из accrualQueue и опрашивает
 // accrual-систему. Для каждого заказа:
 //   - при получении ответа с кодом 200 — отправляет обновление в dbUpdateQueue;
-//   - при нефинальном статусе (REGISTERED, PROCESSING) — переотправляет
-//     заказ в очередь через AccrualRetryDelay;
+//   - при нефинальном статусе (REGISTERED, PROCESSING) или неизвестном статусе
+//     (маппится на PROCESSING) — переотправляет заказ в очередь через AccrualRetryDelay;
 //   - при коде 204 (не зарегистрирован) — переотправляет через AccrualRetryDelay;
 //   - при коде 429 — полная остановка на Retry-After.
 //
