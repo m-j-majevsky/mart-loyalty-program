@@ -21,6 +21,10 @@ import (
 // procTimeout — таймаут на обработку одного HTTP-запроса.
 const procTimeout = 5 * time.Second
 
+// maxOrderNumberLen — ограничение на размер тела при загрузке номера заказа.
+// Номер заказа — короткая строка из цифр, большие тела отсекаются.
+const maxOrderNumberLen = 64
+
 // UserAuthService — регистрация и аутентификация пользователей.
 type UserAuthService interface {
 	RegisterUser(ctx context.Context, login, password string) (int64, error)
@@ -235,6 +239,10 @@ func (rt *Router) uploadOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Ограничиваем размер тела, чтобы защититься от произвольного объёма данных.
+	// Номер заказа — короткая строка из цифр.
+	r.Body = http.MaxBytesReader(w, r.Body, maxOrderNumberLen)
+
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "ошибка чтения тела запроса", http.StatusBadRequest)
@@ -376,8 +384,7 @@ func (rt *Router) getBalance(w http.ResponseWriter, r *http.Request) {
 // в счёт оплаты нового заказа. Принимает JSON с полями order и sum.
 // Проверяет номер по Луну (код 422 при неуспехе),
 // проверяет достаточность баланса (код 402 при нехватке),
-// создаёт заказ и запись о списании в одной транзакции,
-// ставит заказ в очередь на опрос accrual-системы.
+// создаёт заказ и запись о списании в одной транзакции.
 func (rt *Router) withdraw(w http.ResponseWriter, r *http.Request) {
 	userID, err := getUserIDInt64(r)
 	if err != nil {
@@ -421,7 +428,7 @@ func (rt *Router) withdraw(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if errors.Is(err, service.ErrOrderAlreadyExists) {
-			http.Error(w, "заказ уже зарегистрирован", http.StatusUnprocessableEntity)
+			http.Error(w, "номер заказа уже использован", http.StatusUnprocessableEntity)
 			return
 		}
 

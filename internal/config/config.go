@@ -41,7 +41,8 @@ func LoadApplicationConfig() (ApplicationConfig, error) {
 		cfg.AccrualSystemAddress = v
 	}
 
-	// Ключ подписи JWT: из env или значение по умолчанию для черновой версии
+	// Ключ подписи JWT: из env или значение по умолчанию.
+	// Для production ключ должен быть задан через переменную окружения SIGNING_KEY.
 	if v, ok := os.LookupEnv("SIGNING_KEY"); ok && v != "" {
 		cfg.SigningKey = []byte(v)
 	} else {

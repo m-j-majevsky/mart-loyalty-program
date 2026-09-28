@@ -62,7 +62,7 @@ type OrderStore interface {
 
 // WithdrawalStore — операции со списаниями: списание баллов и листинг.
 type WithdrawalStore interface {
-	// WithdrawPoints списывает баллы с баланса пользователя в счёт заказа orderNo.
+	// WithdrawPoints списывает баллы с баланса пользователя в счёт нового заказа orderNo.
 	// Выполняет в одной транзакции следущие операции:
 	// блокировка пользователя,
 	// проверка баланса,
@@ -258,7 +258,6 @@ func (s *GopherMart) UploadOrder(ctx context.Context, orderNumber string, userID
 
 // WithdrawPoints списывает баллы с баланса пользователя в счёт нового заказа.
 // Проверяет баланс и создаёт заказ в одной транзакции (через хранилище).
-// Заказ также ставится в очередь на опрос accrual-системы.                    <= TODO: проверить (см. ниже)
 // Возвращает:
 // ErrInsufficientFunds при нехватке баллов,
 // ErrOrderAlreadyExists — если заказ уже зарегистрирован.
@@ -276,11 +275,6 @@ func (s *GopherMart) WithdrawPoints(ctx context.Context, userID int64, orderNo s
 		}
 		return fmt.Errorf("ошибка списания баллов: %w", err)
 	}
-
-	// TODO:
-	// Убедиться, что в данном случае нужно ставить вызов в очередь.
-	// Возможно, не нужно, поскольку начисление за заказ, в рамках которого баллы списываются, сомнительно.
-	s.enqueueOrder(orderNo)
 
 	return nil
 }
@@ -415,10 +409,10 @@ func (s *GopherMart) StopAccrualProcessor() {
 
 // runAccrualWorker читает номера заказов из accrualQueue и опрашивает
 // accrual-систему. Для каждого заказа:
-//   - при получении финального статуса (INVALID, PROCESSED) — отправляет
-//     обновление в dbUpdateQueue;
-//   - при нефинальном статусе (REGISTERED, PROCESSING) или коде 204 —
-//     повторно ставит заказ в очередь через AccrualRetryDelay;
+//   - при получении ответа с кодом 200 — отправляет обновление в dbUpdateQueue;
+//   - при нефинальном статусе (REGISTERED, PROCESSING) — переотправляет
+//     заказ в очередь через AccrualRetryDelay;
+//   - при коде 204 (не зарегистрирован) — переотправляет через AccrualRetryDelay;
 //   - при коде 429 — полная остановка на Retry-After.
 //
 // Между запросами выдерживается AccrualPollInterval.
@@ -515,15 +509,16 @@ func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string) ti
 
 	// Отправляем обновление в очередь записи в БД.
 	//
-	// Используется блокирующая отправка через select с проверкой канала closed.
-	// Если dbUpdateQueue переполнен (БД не справляется с записью), accrual-воркер
-	// приостановится и будет ждать, пока в очереди не освободится место. Это
-	// создаёт естественный backpressure: нет смысла опрашивать accrual-систему
-	// быстрее, чем мы можем записать результат в БД.
+	// Используется блокирующая отправка через select с проверкой канала closed
+	// и контекста ctx. Если dbUpdateQueue переполнен (БД не справляется с записью),
+	// accrual-воркер приостанавливается и будет ждать, пока в очереди не освободится
+	// место. Это создаёт естественный backpressure: нет смысла опрашивать
+	// accrual-систему быстрее, чем мы можем записать результат в БД.
 	//
-	// При отмене контекста и при shutdown select разблокируется, воркер корректно завершится
-	// и закроет dbUpdateQueue. Обновление гарантированно доставляется в очередь
-	// или  корректно отбрасывается при остановке сервиса (startup-sweep подхватит при рестарте).
+	// При отмене контекста и при shutdown select разблокируется, воркер корректно
+	// завершится и закроет dbUpdateQueue. Обновление гарантированно доставляется
+	// в очередь или корректно отбрасывается при остановке сервиса (startup-sweep
+	// подхватит при рестарте).
 	select {
 	case s.dbUpdateQueue <- update:
 	case <-s.closed:
@@ -555,21 +550,24 @@ func (s *GopherMart) requeueOrder(orderNumber string, delay time.Duration) {
 
 // runBatchProcessor читает обновления из dbUpdateQueue, накапливает их в батч
 // и пакетно записывает в БД при достижении DBUpdateBatchSize или по таймеру
-// DBUpdateFlushTimeout. Паттерн заимствован из url-shortener (fan-in).
+// DBUpdateFlushTimeout.
+//
+// Сброс батча в БД выполняется синхронно.
+// Это гарантирует порядок записи: обновления одного заказа не могут
+// прийти в БД в произвольном порядке. Если БД медленно отвечает,
+// основной цикл блокируется на flush — это создаёт естественный backpressure
+// для accrual-воркера (через переполнение dbUpdateQueue).
 //
 // Процессор завершается ТОЛЬКО при закрытии dbUpdateQueue (воркером),
-// после чего сбрасывает оставшийся батч и ждёт завершения всех горутин записи.
-// Использование отдельного контекста с таймаутом для flush гарантирует,
-// что финальный батч будет записан даже если основной контекст уже отменён.
+// после чего сбрасывает оставшийся батч. Использование отдельного контекста
+// с таймаутом для flush гарантирует, что финальный батч будет записан
+// даже если основной контекст сервиса уже отменён.
 func (s *GopherMart) runBatchProcessor() {
 	batch := make([]repository.OrderUpdate, 0, s.config.DBUpdateBatchSize)
 	ticker := time.NewTicker(s.config.DBUpdateFlushTimeout)
 	defer ticker.Stop()
 
-	var storageWg sync.WaitGroup
-
-	// flush сбрасывает накопленный батч в БД в отдельной горутине.
-	// Копирует батч, чтобы не блокировать накопление следующих элементов.
+	// flush сбрасывает накопленный батч в БД синхронно.
 	// Использует свежий контекст с таймаутом 10 секунд — это гарантирует,
 	// что финальный flush при остановке сработает даже если основной
 	// контекст сервиса уже отменён.
@@ -581,15 +579,11 @@ func (s *GopherMart) runBatchProcessor() {
 		copy(batchToStore, batch)
 		batch = batch[:0]
 
-		storageWg.Add(1)
-		go func(b []repository.OrderUpdate) {
-			defer storageWg.Done()
-			flushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if err := s.config.Storage.BatchUpdateOrders(flushCtx, b); err != nil {
-				logger.Log.Error("ошибка пакетного обновления заказов", zap.Error(err))
-			}
-		}(batchToStore)
+		flushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.config.Storage.BatchUpdateOrders(flushCtx, batchToStore); err != nil {
+			logger.Log.Error("ошибка пакетного обновления заказов", zap.Error(err))
+		}
 	}
 
 	for {
@@ -598,7 +592,6 @@ func (s *GopherMart) runBatchProcessor() {
 			if !ok {
 				// Канал закрыт воркером — финальный сброс и выход
 				flush()
-				storageWg.Wait()
 				return
 			}
 			batch = append(batch, update)

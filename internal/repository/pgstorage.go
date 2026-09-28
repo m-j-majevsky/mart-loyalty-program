@@ -146,12 +146,14 @@ func (s *pgStorage) GetBalance(ctx context.Context, userID int64) (decimal.Decim
 	return balance, withdrawn, nil
 }
 
-// WithdrawPoints списывает баллы с баланса пользователя userID в счёт заказа orderNo.
+// WithdrawPoints списывает баллы с баланса пользователя userID в счёт нового заказа orderNo.
 // Выполняется в одной транзакции:
-// 1. pg_advisory_xact_lock сериализует операции по одному пользователю;
-// 2. условный UPDATE проверяет достаточность баланса и списывает;
-// 3. INSERT в orders создаёт заказ со статусом NEW;
-// 4. INSERT в withdrawals фиксирует факт списания.
+//  1. pg_advisory_xact_lock сериализует операции по одному пользователю;
+//  2. условный UPDATE проверяет достаточность баланса и списывает;
+//  3. INSERT в orders создаёт заказ со статусом PROCESSED
+//     во избежание повторного обращения по нему в accrual-систему;
+//  4. INSERT в withdrawals фиксирует факт списания.
+//
 // Если баланса недостаточно — возвращает ErrInsufficientFunds.
 // Если заказ уже существует — возвращает ErrOrderAlreadyExists (транзакция откатывается).
 func (s *pgStorage) WithdrawPoints(ctx context.Context, userID int64, orderNo string, sum decimal.Decimal) error {
@@ -174,7 +176,7 @@ func (s *pgStorage) WithdrawPoints(ctx context.Context, userID int64, orderNo st
 		SET balance = balance - $1, withdrawn = withdrawn + $1
 		WHERE id = $2 AND balance >= $1
 		RETURNING balance
-	    `, sum, userID).Scan(&newBalance)
+    `, sum, userID).Scan(&newBalance)
 
 	if errors.Is(err, pgx.ErrNoRows) {
 		return NewErrInsufficientFunds()
@@ -186,8 +188,8 @@ func (s *pgStorage) WithdrawPoints(ctx context.Context, userID int64, orderNo st
 	// Шаг 3: вставляем заказ (accrual не указываем — используется DEFAULT 0, аналогично CreateOrder)
 	_, err = tx.Exec(ctx, `
 		INSERT INTO orders (number, user_id, status)
-		VALUES ($1, $2, 'NEW')
-	    `, orderNo, userID)
+		VALUES ($1, $2, 'PROCESSED')
+    `, orderNo, userID)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -200,7 +202,7 @@ func (s *pgStorage) WithdrawPoints(ctx context.Context, userID int64, orderNo st
 	_, err = tx.Exec(ctx, `
 		INSERT INTO withdrawals (user_id, order_number, sum)
 		VALUES ($1, $2, $3)
-	    `, userID, orderNo, sum)
+    `, userID, orderNo, sum)
 	if err != nil {
 		return fmt.Errorf("ошибка записи о списании: %w", err)
 	}
@@ -258,6 +260,9 @@ func (s *pgStorage) ListPendingOrderNumbers(ctx context.Context) ([]string, erro
 // Для каждого заказа со статусом PROCESSED и положительным accrual
 // начисляет баллы на баланс пользователя — владельца заказа.
 // Вся операция выполняется в одной транзакции.
+//
+// Запросы выполняются без прекомпиляции, поскольку для коротких батчей (до 512 элементов)
+// overhead от Prepare может превысить выгоду от повторного использования подготовленного запроса.
 func (s *pgStorage) BatchUpdateOrders(ctx context.Context, updates []OrderUpdate) error {
 	if len(updates) == 0 {
 		return nil
@@ -269,34 +274,24 @@ func (s *pgStorage) BatchUpdateOrders(ctx context.Context, updates []OrderUpdate
 	}
 	defer tx.Rollback(ctx)
 
-	// Прекомпилируем запрос на обновление таблицы заказов
-	qUpdateOrders := `UPDATE orders
-			          SET status = $1, accrual = $2
-			          WHERE number = $3`
-	qUpdateOrdersTag := "batch_update_orders"
-	if _, err = tx.Prepare(ctx, qUpdateOrdersTag, qUpdateOrders); err != nil {
-		return fmt.Errorf("ошибка подготовки запроса: %w", err)
-	}
+	const qUpdateOrders = `UPDATE orders
+		                   SET status = $1, accrual = $2
+		                   WHERE number = $3`
 
-	// Прекомпилируем запрос на обновление таблицы пользователей
-	qUpdateUsers := `UPDATE users
-				     SET balance = balance + $1
-				     WHERE id = (SELECT user_id FROM orders WHERE number = $2)`
-	qUpdateUsersTag := "batch_update_users"
-	if _, err = tx.Prepare(ctx, qUpdateUsersTag, qUpdateUsers); err != nil {
-		return fmt.Errorf("ошибка подготовки запроса: %w", err)
-	}
+	const qUpdateUsers = `UPDATE users
+		                  SET balance = balance + $1
+		                  WHERE id = (SELECT user_id FROM orders WHERE number = $2)`
 
 	for _, u := range updates {
 		// Обновляем статус и начисление заказа
-		_, err := tx.Exec(ctx, qUpdateOrdersTag, u.Status, u.Accrual, u.Number)
+		_, err := tx.Exec(ctx, qUpdateOrders, u.Status, u.Accrual, u.Number)
 		if err != nil {
 			return fmt.Errorf("ошибка обновления заказа %s: %w", u.Number, err)
 		}
 
 		// Если заказ обработан и есть начисление — добавляем баллы пользователю
 		if u.Status == "PROCESSED" && u.Accrual.GreaterThan(decimal.Zero) {
-			_, err = tx.Exec(ctx, qUpdateUsersTag, u.Accrual, u.Number)
+			_, err = tx.Exec(ctx, qUpdateUsers, u.Accrual, u.Number)
 			if err != nil {
 				return fmt.Errorf("ошибка начисления баллов для заказа %s: %w", u.Number, err)
 			}

@@ -52,13 +52,16 @@ func (c *compressWriter) Write(p []byte) (int, error) {
 	return c.zw.Write(p)
 }
 
+// WriteHeader устанавливает заголовок Content-Encoding: gzip для всех
+// статус-кодов, кроме 204 (No Content) и 304 (Not Modified),
+// у которых нет тела ответа.
 func (c *compressWriter) WriteHeader(statusCode int) {
 	if c.wroteHeader {
 		return
 	}
 	c.wroteHeader = true
 
-	if statusCode < 300 {
+	if statusCode != http.StatusNoContent && statusCode != http.StatusNotModified {
 		c.w.Header().Set("Content-Encoding", "gzip")
 	}
 
@@ -101,30 +104,17 @@ func (c *compressReader) Close() error {
 	return c.zr.Close()
 }
 
-// GzipMiddleware — middleware для прозрачной компрессии/декомпрессии
-// HTTP-запросов и ответов в формате gzip. Если клиент не поддерживает gzip
-// или Content-Type не входит в список разрешённых, передаёт запрос дальше без изменений.
+// GzipMiddleware — middleware для прозрачной gzip-компрессии ответов
+// и декомпрессии тел запросов.
+//
+// Логика разделена на два независимых механизма:
+//   - декомпрессия тела запроса — если заголовок Content-Encoding содержит gzip;
+//   - компрессия ответа — если заголовок Accept-Encoding содержит gzip.
 func GzipMiddleware(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !isValidRequestContentType(r.Header.Get(ContentType)) {
-			h.ServeHTTP(w, r)
-			return
-		}
-
-		ow := w
-
-		acceptEncoding := r.Header.Get("Accept-Encoding")
-		supportsGzip := strings.Contains(acceptEncoding, "gzip")
-
-		if supportsGzip {
-			cw := newCompressWriter(w)
-			ow = cw
-			defer cw.Close()
-		}
-
+		// Декомпрессия тела запроса, если клиент прислал gzip.
 		contentEncoding := r.Header.Get("Content-Encoding")
-		sendsGzip := strings.Contains(contentEncoding, "gzip")
-		if sendsGzip {
+		if strings.Contains(contentEncoding, "gzip") {
 			cr, err := newCompressReader(r.Body)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
@@ -134,14 +124,17 @@ func GzipMiddleware(h http.Handler) http.Handler {
 			defer cr.Close()
 		}
 
+		// Компрессия ответа, если клиент поддерживает gzip.
+		ow := w
+		acceptEncoding := r.Header.Get("Accept-Encoding")
+		if strings.Contains(acceptEncoding, "gzip") {
+			cw := newCompressWriter(w)
+			ow = cw
+			defer cw.Close()
+		}
+
 		h.ServeHTTP(ow, r)
 	})
-}
-
-// isValidRequestContentType проверяет, что Content-Type запроса
-// входит в список разрешённых для gzip-обработки.
-func isValidRequestContentType(ct string) bool {
-	return ct == TextPlain || ct == AppJSON
 }
 
 // RequireAuth — middleware, проверяющая аутентификацию пользователя
