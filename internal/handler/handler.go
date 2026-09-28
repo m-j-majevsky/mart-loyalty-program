@@ -21,18 +21,37 @@ import (
 // procTimeout — таймаут на обработку одного HTTP-запроса.
 const procTimeout = 5 * time.Second
 
-// GopherMartService — интерфейс сервисного слоя, используемый хендлером.
-// Содержит только те методы, которые нужны HTTP-обработчикам.
-type GopherMartService interface {
+// UserAuthService — регистрация и аутентификация пользователей.
+type UserAuthService interface {
 	RegisterUser(ctx context.Context, login, password string) (int64, error)
 	AuthenticateUser(ctx context.Context, login, password string) (int64, error)
+}
+
+// OrderService — операции с заказами.
+type OrderService interface {
 	UploadOrder(ctx context.Context, orderNumber string, userID int64) error
-	WithdrawPoints(ctx context.Context, userID int64, orderNo string, sum decimal.Decimal) error
-	ListUserOrders(ctx context.Context, userID int64) ([]service.OrderDTO, error)
-	GetBalance(ctx context.Context, userID int64) (decimal.Decimal, decimal.Decimal, error)
-	ListWithdrawals(ctx context.Context, userID int64) ([]service.WithdrawalDTO, error)
 	GetOrderByNumber(ctx context.Context, number string) (int64, error)
+	ListUserOrders(ctx context.Context, userID int64) ([]service.OrderDTO, error)
+}
+
+// BalanceService — баланс и списания.
+type BalanceService interface {
+	GetBalance(ctx context.Context, userID int64) (decimal.Decimal, decimal.Decimal, error)
+	WithdrawPoints(ctx context.Context, userID int64, orderNo string, sum decimal.Decimal) error
+	ListWithdrawals(ctx context.Context, userID int64) ([]service.WithdrawalDTO, error)
+}
+
+// Pinger — проверка доступности хранилища.
+type Pinger interface {
 	Ping(ctx context.Context) error
+}
+
+// GopherMartService — составной интерфейс сервисного слоя, используемый хендлером.
+type GopherMartService interface {
+	UserAuthService
+	OrderService
+	BalanceService
+	Pinger
 }
 
 // RouterParams содержит параметры для создания HTTP-роутера.
@@ -63,9 +82,9 @@ type Router struct {
 }
 
 // NewRouter создаёт и настраивает HTTP-роутер со всеми эндпоинтами сервиса.
-// Подключает middleware: логирование, gzip-компрессия, аутентификация
-// для защищённых маршрутов. Возвращает готовый Router.
-func NewRouter(params RouterParams) (*Router, error) {
+// Подключает middleware: логирование, gzip-компрессия, аутентификация для защищённых маршрутов.
+// Возвращает готовый Router.
+func NewRouter(params RouterParams) *Router {
 	r := chi.NewRouter()
 
 	r.Use(logger.WithLogging)
@@ -100,7 +119,7 @@ func NewRouter(params RouterParams) (*Router, error) {
 
 	r.Get("/ping", rt.pingDB)
 
-	return rt, nil
+	return rt
 }
 
 // ServeHTTP делегирует обработку запроса внутреннему chi-роутеру.
@@ -110,8 +129,7 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // getUserIDInt64 — вспомогательная функция, извлекающая ID пользователя
 // из контекста запроса и преобразующая его в int64.
-// Используется во всех защищённых хендлерах, чтобы избежать
-// дублирования пары getUserIDFromContext + strconv.ParseInt.
+// Используется во всех защищённых хендлерах.
 // Возвращает ID пользователя или ошибку, если пользователь не аутентифицирован.
 func getUserIDInt64(r *http.Request) (int64, error) {
 	userIDStr, err := getUserIDFromContext(r.Context())
@@ -122,8 +140,8 @@ func getUserIDInt64(r *http.Request) (int64, error) {
 }
 
 // register обрабатывает POST /api/user/register — регистрацию нового пользователя.
-// Принимает JSON с полями login и password. При успехе устанавливает cookie
-// с JWT-токеном и возвращает 200. Если логин занят — 409.
+// Принимает JSON с полями login и password. При успехе устанавливает
+// cookie с JWT-токеном и возвращает 200. Если логин занят — 409.
 func (rt *Router) register(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Login    string `json:"login"`
@@ -164,8 +182,8 @@ func (rt *Router) register(w http.ResponseWriter, r *http.Request) {
 }
 
 // login обрабатывает POST /api/user/login — аутентификацию пользователя.
-// Принимает JSON с полями login и password. При успехе устанавливает cookie
-// с JWT-токеном и возвращает 200. При неверных данных — 401.
+// Принимает JSON с полями login и password. При успехе устанавливает
+// cookie с JWT-токеном и возвращает 200. При неверных данных — 401.
 func (rt *Router) login(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Login    string `json:"login"`
@@ -206,8 +224,9 @@ func (rt *Router) login(w http.ResponseWriter, r *http.Request) {
 }
 
 // uploadOrder обрабатывает POST /api/user/orders — загрузку номера заказа.
-// Принимает номер заказа в виде plain text. Проверяет номер по алгоритму Луна (422).
-// Если заказ уже загружен этим пользователем — 200, другим — 409.
+// Принимает номер заказа в виде plain text.
+// Проверяет номер по алгоритму Луна (отдает код 422 в случае неуспеха).
+// Если заказ уже загружен этим пользователем отвечает кодом 200, другим — 409.
 // Новый заказ — 202 и постановка в очередь на опрос accrual-системы.
 func (rt *Router) uploadOrder(w http.ResponseWriter, r *http.Request) {
 	userID, err := getUserIDInt64(r)
@@ -238,9 +257,7 @@ func (rt *Router) uploadOrder(w http.ResponseWriter, r *http.Request) {
 
 	err = rt.service.UploadOrder(ctx, orderNumber, userID)
 	if err != nil {
-		// Заказ уже существует — определяем владельца одним запросом.
-		// Хендлер проверяет ошибку сервисного слоя (а не repository),
-		// что избавляет его от зависимости на пакет хранилища.
+		// Заказ уже существует — определяем владельца одним запросом в БД.
 		if errors.Is(err, service.ErrOrderAlreadyExists) {
 			ownerID, ownerErr := rt.service.GetOrderByNumber(ctx, orderNumber)
 			if ownerErr != nil {
@@ -357,9 +374,10 @@ func (rt *Router) getBalance(w http.ResponseWriter, r *http.Request) {
 
 // withdraw обрабатывает POST /api/user/balance/withdraw — списание баллов
 // в счёт оплаты нового заказа. Принимает JSON с полями order и sum.
-// Проверяет номер по Луну (422), проверяет достаточность баланса (402),
-// создаёт заказ и запись о списании в одной транзакции, ставит заказ
-// в очередь на опрос accrual-системы.
+// Проверяет номер по Луну (код 422 при неуспехе),
+// проверяет достаточность баланса (код 402 при нехватке),
+// создаёт заказ и запись о списании в одной транзакции,
+// ставит заказ в очередь на опрос accrual-системы.
 func (rt *Router) withdraw(w http.ResponseWriter, r *http.Request) {
 	userID, err := getUserIDInt64(r)
 	if err != nil {
@@ -397,8 +415,6 @@ func (rt *Router) withdraw(w http.ResponseWriter, r *http.Request) {
 
 	err = rt.service.WithdrawPoints(ctx, userID, req.Order, req.Sum)
 	if err != nil {
-		// Хендлер проверяет ошибки сервисного слоя, а не repository.
-		// Это избавляет его от прямой зависимости на пакет хранилища.
 		if errors.Is(err, service.ErrInsufficientFunds) {
 			http.Error(w, "на счету недостаточно средств", http.StatusPaymentRequired)
 			return
@@ -452,8 +468,6 @@ func (rt *Router) listWithdrawals(w http.ResponseWriter, r *http.Request) {
 	}
 
 	items := make([]withdrawalItem, 0, len(withdrawals))
-	// Переменная цикла названа wl, а не w, чтобы не затенять
-	// параметр-ResponseWriter (govet: shadow).
 	for _, wl := range withdrawals {
 		items = append(items, withdrawalItem{
 			Order:       wl.OrderNumber,

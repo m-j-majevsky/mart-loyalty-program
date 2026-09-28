@@ -425,13 +425,13 @@ func (s *GopherMart) StopAccrualProcessor() {
 // Воркер завершается при закрытии closed или отмене ctx,
 // после чего закрывает dbUpdateQueue для каскадной остановки batch processor.
 func (s *GopherMart) runAccrualWorker(ctx context.Context) {
+	defer close(s.dbUpdateQueue)
+
 	for {
 		select {
 		case <-s.closed:
-			close(s.dbUpdateQueue)
 			return
 		case <-ctx.Done():
-			close(s.dbUpdateQueue)
 			return
 
 		case orderNumber := <-s.accrualQueue:
@@ -448,10 +448,8 @@ func (s *GopherMart) runAccrualWorker(ctx context.Context) {
 			select {
 			case <-time.After(wait):
 			case <-s.closed:
-				close(s.dbUpdateQueue)
 				return
 			case <-ctx.Done():
-				close(s.dbUpdateQueue)
 				return
 			}
 		}
@@ -475,9 +473,10 @@ func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string) ti
 			logger.Log.Info("превышен лимит запросов к accrual-системе, приостанавливаем воркер",
 				zap.String("заказ", orderNumber),
 				zap.Int("повтор_через_сек", etmr.RetryAfter))
-			s.requeueOrder(orderNumber, s.config.AccrualRetryDelay)
+			delay := time.Duration(etmr.RetryAfter) * time.Second
+			s.requeueOrder(orderNumber, delay)
 			// Возвращаем задержку, чтобы воркер полностью остановился на Retry-After
-			return time.Duration(etmr.RetryAfter) * time.Second
+			return delay
 		}
 
 		var enr *accrual.ErrNotRegistered
@@ -522,13 +521,16 @@ func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string) ti
 	// создаёт естественный backpressure: нет смысла опрашивать accrual-систему
 	// быстрее, чем мы можем записать результат в БД.
 	//
-	// При shutdown канал closed мгновенно разблокирует select, воркер корректно завершится
+	// При отмене контекста и при shutdown select разблокируется, воркер корректно завершится
 	// и закроет dbUpdateQueue. Обновление гарантированно доставляется в очередь
 	// или  корректно отбрасывается при остановке сервиса (startup-sweep подхватит при рестарте).
 	select {
 	case s.dbUpdateQueue <- update:
 	case <-s.closed:
 		logger.Log.Info("сервис останавливается, обновление заказа не записано в БД",
+			zap.String("заказ", orderNumber))
+	case <-ctx.Done():
+		logger.Log.Info("контекст отменён, обновление заказа не записано в БД",
 			zap.String("заказ", orderNumber))
 	}
 

@@ -77,14 +77,12 @@ func WithLogging(h http.Handler) http.Handler {
 		h.ServeHTTP(&lw, r)
 		duration := time.Since(start)
 
-		Log.Info("входящий запрос",
+		Log.Info("HTTP-запрос",
 			zap.String("uri", r.RequestURI),
 			zap.String("метод", r.Method),
-			zap.Duration("длительность", duration),
-		)
-		Log.Info("ответ сервера",
 			zap.Int("статус", responseData.status),
 			zap.Int("размер", responseData.size),
+			zap.Duration("длительность", duration),
 		)
 	}
 	return http.HandlerFunc(logFn)

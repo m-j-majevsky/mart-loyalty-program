@@ -141,7 +141,7 @@ func GzipMiddleware(h http.Handler) http.Handler {
 // isValidRequestContentType проверяет, что Content-Type запроса
 // входит в список разрешённых для gzip-обработки.
 func isValidRequestContentType(ct string) bool {
-	return ct == TextPlain || ct == AppJSON || ct == ""
+	return ct == TextPlain || ct == AppJSON
 }
 
 // RequireAuth — middleware, проверяющая аутентификацию пользователя

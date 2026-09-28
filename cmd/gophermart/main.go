@@ -78,10 +78,7 @@ func main() {
 
 	// Создаём роутер
 	routerParams := handler.NewRouterParams(cfg, svc)
-	rt, err := handler.NewRouter(routerParams)
-	if err != nil {
-		logger.Log.Fatal("ошибка создания роутера", zap.Error(err))
-	}
+	rt := handler.NewRouter(routerParams)
 
 	// Запускаем фоновый обработчик accrual-запросов
 	var backgroundWg sync.WaitGroup
