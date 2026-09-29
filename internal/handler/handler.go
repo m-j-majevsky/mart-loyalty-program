@@ -41,6 +41,11 @@ const maxOrderNumberLen = 64
 // withdraw. Защищает от произвольно больших тел запроса.
 const maxJSONBodyLen = 4096
 
+// ---------------------------------------------------------------------------
+// Интерфейсы сервиса.
+// Подробный комментарий к методам см. в '../service/service.go'.
+// ---------------------------------------------------------------------------
+
 // UserAuthService — регистрация и аутентификация пользователей.
 type UserAuthService interface {
 	RegisterUser(ctx context.Context, login, password string) (int64, error)
@@ -73,6 +78,10 @@ type GopherMartService interface {
 	BalanceService
 	Pinger
 }
+
+// ---------------------------------------------------------------------------
+// Конфигурация и код HTTP-роутера.
+// ---------------------------------------------------------------------------
 
 // RouterParams содержит параметры для создания HTTP-роутера.
 type RouterParams struct {

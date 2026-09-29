@@ -139,6 +139,10 @@ func main() {
 // createPool создаёт настроенный пул соединений к PostgreSQL и проверяет
 // подключение с помощью ping. Возвращает *pgxpool.Pool или ошибку,
 // если подключение не удалось установить.
+//
+// Данная реализация предполагает, что конфиг соединения передается
+// в DSN-строке, например, с флагом "-d" командрой строки при запуске:
+// -d "postgres://gophermart:SECRET@localhost:30432/gophermart?sslmode=disable&pool_max_conns=10&pool_max_conn_lifetime=30m&pool_min_conns=2&pool_max_conn_idle_time=5m"
 func createPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
