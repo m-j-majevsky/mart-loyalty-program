@@ -19,11 +19,11 @@ type ApplicationConfig struct {
 	ShutdownTimeout      time.Duration // таймаут graceful shutdown
 }
 
-// LoadApplicationConfig загружает конфигурацию из флагов командной строки
-// и переменных окружения и проверяет, что обязательные параметры заданы.
+// LoadApplicationConfig загружает конфигурацию из переменных окружения
+// и флагов командной строки и проверяет, что обязательные параметры заданы.
 //
 // Конфигурация разделена на два слоя:
-//   - readApplicationConfig — слой чтения: считывает значения из флагов и env,
+//   - readApplicationConfig — слой чтения: считывает значения из env и флагов,
 //     не интерпретируя содержимое (пустая строка считается валидным значением);
 //   - validateApplicationConfig — слой валидации: проверяет, что обязательные
 //     параметры непусты, и возвращает итоговую структуру или ошибку.
@@ -48,27 +48,48 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-// readApplicationConfig — слой чтения: считывает значения из флагов
-// командной строки и переменных окружения. Переменные окружения имеют
-// приоритет над флагами. Не валидирует значения — пустая строка
-// считается валидным результатом чтения.
+// readApplicationConfig — слой чтения: считывает значения из переменных
+// окружения и флагов командной строки. Флаги командной строки имеют
+// приоритет над переменными окружения: явный выбор оператора в момент
+// запуска перекрывает фоновую конфигурацию среды.
+//
+// Логика приоритета (от низшего к высшему):
+//  1. жёстко заданные значения по умолчанию;
+//  2. переменные окружения — перекрывают значения по умолчанию;
+//  3. флаги командной строки — перекрывают переменные окружения.
+//
+// Реализация: значения из env используются как значения по умолчанию
+// для флагов. Если флаг задан в командной строке — flag.Parse выбирает
+// его значение; если не задан — остаётся значение из env (использованное
+// как default). Не валидирует значения — пустая строка считается
+// валидным результатом чтения.
 func readApplicationConfig() ApplicationConfig {
 	cfg := ApplicationConfig{}
 
-	// Флаги командной строки — значения по умолчанию
-	parseFlags(&cfg)
+	// Шаг 1: жёстко заданные значения по умолчанию.
+	const (
+		defaultLogLevel   = "info"
+		defaultRunAddress = ":8080"
+	)
 
-	// Переменные окружения имеют приоритет над флагами.
-	// envOr берёт значение из окружения, если переменная задана (даже пустая),
-	// иначе оставляет значение из флагов.
-	cfg.LogLevel = envOr("LOG_LEVEL", cfg.LogLevel)
-	cfg.RunAddress = envOr("RUN_ADDRESS", cfg.RunAddress)
-	cfg.DatabaseURI = envOr("DATABASE_URI", cfg.DatabaseURI)
-	cfg.AccrualSystemAddress = envOr("ACCRUAL_SYSTEM_ADDRESS", cfg.AccrualSystemAddress)
+	// Шаг 2: переменные окружения перекрывают значения по умолчанию.
+	// Результат используется как default для флагов на шаге 3.
+	envLogLevel := envOr("LOG_LEVEL", defaultLogLevel)
+	envRunAddress := envOr("RUN_ADDRESS", defaultRunAddress)
+	envDatabaseURI := envOr("DATABASE_URI", "")
+	envAccrualSystemAddress := envOr("ACCRUAL_SYSTEM_ADDRESS", "")
+
+	// Шаг 3: флаги командной строки перекрывают переменные окружения.
+	// Значения из env передаём как defaults: если флаг не задан явно,
+	// остаётся значение из env; если задан — флаг побеждает.
+	flag.StringVar(&cfg.RunAddress, "a", envRunAddress, "адрес и порт запуска сервиса")
+	flag.StringVar(&cfg.DatabaseURI, "d", envDatabaseURI, "строка подключения к базе данных PostgreSQL")
+	flag.StringVar(&cfg.AccrualSystemAddress, "r", envAccrualSystemAddress, "адрес системы расчёта начислений")
+	flag.StringVar(&cfg.LogLevel, "l", envLogLevel, "уровень логирования")
+	flag.Parse()
 
 	// Ключ подписи JWT: из env или значение по умолчанию.
-	// Используем os.LookupEnv напрямую, чтобы различать «не задана»
-	// (использовать дефолт) и «задана пустой» (валидация поймает).
+	// Не параметризуется флагом командной строки.
 	if v, ok := os.LookupEnv("SIGNING_KEY"); ok {
 		cfg.SigningKey = []byte(v)
 	} else {
@@ -104,14 +125,4 @@ func validateApplicationConfig(cfg ApplicationConfig) (ApplicationConfig, error)
 	}
 
 	return cfg, nil
-}
-
-// parseFlags регистрирует и разбирает флаги командной строки,
-// записывая результат в структуру cfg.
-func parseFlags(cfg *ApplicationConfig) {
-	flag.StringVar(&cfg.RunAddress, "a", ":8080", "адрес и порт запуска сервиса")
-	flag.StringVar(&cfg.DatabaseURI, "d", "", "строка подключения к базе данных PostgreSQL")
-	flag.StringVar(&cfg.AccrualSystemAddress, "r", "", "адрес системы расчёта начислений")
-	flag.StringVar(&cfg.LogLevel, "l", "info", "уровень логирования")
-	flag.Parse()
 }
