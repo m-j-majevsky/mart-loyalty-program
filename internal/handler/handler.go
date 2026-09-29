@@ -19,6 +19,17 @@ import (
 	"go.uber.org/zap"
 )
 
+// jsonNumber — обёртка над decimal.Decimal, сериализуется в JSON как число,
+// а не как строка. Стандартный decimal.MarshalJSON отдаёт значение в кавычках,
+// что не удовлетворяет спеке сервиса.
+type jsonNumber decimal.Decimal
+
+// MarshalJSON сериализует значение как число без кавычек.
+func (n jsonNumber) MarshalJSON() ([]byte, error) {
+	d := decimal.Decimal(n)
+	return []byte(d.String()), nil
+}
+
 // procTimeout — таймаут на обработку одного HTTP-запроса.
 const procTimeout = 5 * time.Second
 
@@ -332,10 +343,10 @@ func (rt *Router) listOrders(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	type orderItem struct {
-		Number     string           `json:"number"`
-		Status     string           `json:"status"`
-		Accrual    *decimal.Decimal `json:"accrual,omitempty"`
-		UploadedAt time.Time        `json:"uploaded_at"`
+		Number     string      `json:"number"`
+		Status     string      `json:"status"`
+		Accrual    *jsonNumber `json:"accrual,omitempty"`
+		UploadedAt time.Time   `json:"uploaded_at"`
 	}
 
 	items := make([]orderItem, 0, len(orders))
@@ -347,7 +358,7 @@ func (rt *Router) listOrders(w http.ResponseWriter, r *http.Request) {
 		}
 		// accrual включается только для PROCESSED-заказов с положительным значением
 		if o.Status == "PROCESSED" && o.Accrual.GreaterThan(decimal.Zero) {
-			accrual := o.Accrual
+			accrual := jsonNumber(o.Accrual)
 			item.Accrual = &accrual
 		}
 		items = append(items, item)
@@ -381,11 +392,11 @@ func (rt *Router) getBalance(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	resp := struct {
-		Current   decimal.Decimal `json:"current"`
-		Withdrawn decimal.Decimal `json:"withdrawn"`
+		Current   jsonNumber `json:"current"`
+		Withdrawn jsonNumber `json:"withdrawn"`
 	}{
-		Current:   balance,
-		Withdrawn: withdrawn,
+		Current:   jsonNumber(balance),
+		Withdrawn: jsonNumber(withdrawn),
 	}
 
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -485,16 +496,16 @@ func (rt *Router) listWithdrawals(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	type withdrawalItem struct {
-		Order       string          `json:"order"`
-		Sum         decimal.Decimal `json:"sum"`
-		ProcessedAt time.Time       `json:"processed_at"`
+		Order       string     `json:"order"`
+		Sum         jsonNumber `json:"sum"`
+		ProcessedAt time.Time  `json:"processed_at"`
 	}
 
 	items := make([]withdrawalItem, 0, len(withdrawals))
 	for _, wl := range withdrawals {
 		items = append(items, withdrawalItem{
 			Order:       wl.OrderNumber,
-			Sum:         wl.Sum,
+			Sum:         jsonNumber(wl.Sum),
 			ProcessedAt: wl.ProcessedAt,
 		})
 	}
