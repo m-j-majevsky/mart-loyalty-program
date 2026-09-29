@@ -285,7 +285,7 @@ func (s *pgStorage) BatchUpdateOrders(ctx context.Context, updates []OrderUpdate
 	defer tx.Rollback(ctx)
 
 	const qUpdateOrders = `UPDATE orders
-		                   SET status = $1, accrual = $2
+		                   SET status = $1::order_status, accrual = $2
 		                   WHERE number = $3`
 
 	const qUpdateUsers = `UPDATE users
