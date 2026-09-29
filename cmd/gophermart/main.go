@@ -34,10 +34,16 @@ func main() {
 		log.Fatal(err)
 	}
 
-	if err := logger.Initialize(cfg.LogLevel); err != nil {
+	parentLogger, err := logger.Initialize(cfg.LogLevel)
+	if err != nil {
 		log.Fatal(err)
 	}
-	defer logger.Log.Sync()
+	defer parentLogger.Sync()
+
+	const component = "component"
+	mainLogger := parentLogger.With(zap.String(component, "main"))
+	handlerLogger := parentLogger.With(zap.String(component, "handler"))
+	serviceLogger := parentLogger.With(zap.String(component, "service"))
 
 	// Контекст с возможностью отмены по сигналу ОС
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -46,13 +52,13 @@ func main() {
 	// Создаём пул соединений к PostgreSQL
 	pool, err := createPool(ctx, cfg.DatabaseURI)
 	if err != nil {
-		logger.Log.Fatal("ошибка создания пула соединений к БД", zap.Error(err))
+		mainLogger.Fatal("ошибка создания пула соединений к БД", zap.Error(err))
 	}
 	defer pool.Close()
 
 	// Накатываем миграции (до создания хранилища)
 	if err := migrations.RunMigrations(cfg.DatabaseURI); err != nil {
-		logger.Log.Fatal("ошибка выполнения миграций", zap.Error(err))
+		mainLogger.Fatal("ошибка выполнения миграций", zap.Error(err))
 	}
 
 	// Создаём хранилище
@@ -65,19 +71,20 @@ func main() {
 	svcConfig := service.DefaultServiceConfig()
 	svcConfig.Storage = storage
 	svcConfig.AccrualClient = accrualClient
+	svcConfig.Logger = serviceLogger
 
 	svc, err := service.NewGopherMart(svcConfig)
 	if err != nil {
-		logger.Log.Fatal("ошибка инициализации сервиса", zap.Error(err))
+		mainLogger.Fatal("ошибка инициализации сервиса", zap.Error(err))
 	}
 
 	// Восстанавливаем очередь незавершённых заказов после рестарта
 	if err := svc.EnqueuePendingOrders(ctx); err != nil {
-		logger.Log.Error("ошибка восстановления очереди заказов", zap.Error(err))
+		mainLogger.Error("ошибка восстановления очереди заказов", zap.Error(err))
 	}
 
 	// Создаём роутер
-	routerParams := handler.NewRouterParams(cfg, svc)
+	routerParams := handler.NewRouterParams(cfg, svc, handlerLogger)
 	rt := handler.NewRouter(routerParams)
 
 	// Запускаем фоновый обработчик accrual-запросов
@@ -104,36 +111,36 @@ func main() {
 		}
 	}()
 
-	logger.Log.Info("сервис запущен", zap.String("address", cfg.RunAddress))
+	mainLogger.Info("сервис запущен", zap.String("address", cfg.RunAddress))
 
 	// Блокируем main до получения сигнала ОС или фатальной ошибки сервера
 	select {
 	case <-ctx.Done():
 	case err := <-errCh:
-		logger.Log.Fatal("ошибка HTTP-сервера", zap.Error(err))
+		mainLogger.Fatal("ошибка HTTP-сервера", zap.Error(err))
 	}
 
 	event := zap.String("event", "shutdown")
-	logger.Log.Info("получен сигнал завершения", zap.String("cause", context.Cause(ctx).Error()), event)
+	mainLogger.Info("получен сигнал завершения", zap.String("cause", context.Cause(ctx).Error()), event)
 
 	// Graceful shutdown HTTP-сервера
 	shutdownCtx, shutdownRelease := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer shutdownRelease()
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		logger.Log.Error("ошибка graceful shutdown HTTP-сервера", zap.Error(err), event)
+		mainLogger.Error("ошибка graceful shutdown HTTP-сервера", zap.Error(err), event)
 	} else {
-		logger.Log.Info("HTTP-сервер остановлен корректно", event)
+		mainLogger.Info("HTTP-сервер остановлен корректно", event)
 	}
 
 	// Останавливаем accrual-обработчик
 	svc.StopAccrualProcessor()
-	logger.Log.Info("сигнал остановки accrual-обработчика отправлен", event)
+	mainLogger.Info("сигнал остановки accrual-обработчика отправлен", event)
 
 	// Дожидаемся завершения фоновых горутин
 	backgroundWg.Wait()
 
-	logger.Log.Info("сервис остановлен", event)
+	mainLogger.Info("сервис остановлен", event)
 }
 
 // createPool создаёт настроенный пул соединений к PostgreSQL и проверяет

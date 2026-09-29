@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/m-j-majevsky/gophermart/internal/accrual"
-	"github.com/m-j-majevsky/gophermart/internal/logger"
 	"github.com/m-j-majevsky/gophermart/internal/repository"
 	"github.com/shopspring/decimal"
 
@@ -138,6 +137,7 @@ type ServiceConfig struct {
 	DBUpdateFlushTimeout time.Duration // период сброса батча в БД
 	AccrualPollInterval  time.Duration // задержка между запросами к accrual
 	AccrualRetryDelay    time.Duration // задержка перед повторным опросом accrual о заказе в нефинальном статусе
+	Logger               *zap.Logger   // логгер; если nil — используется no-op
 }
 
 // DefaultServiceConfig возвращает конфигурацию сервиса с значениями по умолчанию.
@@ -170,6 +170,7 @@ func DefaultServiceConfig() ServiceConfig {
 // что каскадно останавливает batch processor.
 type GopherMart struct {
 	config        ServiceConfig
+	log           *zap.Logger                 // логгер для сервиса
 	accrualQueue  chan string                 // канал номеров заказов для опроса accrual
 	dbUpdateQueue chan repository.OrderUpdate // канал обновлений статусов для записи в БД
 	closed        chan struct{}               // сигнальный канал: закрыт при остановке сервиса
@@ -187,8 +188,14 @@ func NewGopherMart(cfg ServiceConfig) (*GopherMart, error) {
 		return nil, fmt.Errorf("ошибка конфигурации: не задан клиент accrual-системы")
 	}
 
+	log := cfg.Logger
+	if log == nil {
+		log = zap.NewNop()
+	}
+
 	return &GopherMart{
 		config:        cfg,
+		log:           log,
 		accrualQueue:  make(chan string, cfg.AccrualQueueBuffer),
 		dbUpdateQueue: make(chan repository.OrderUpdate, cfg.DBUpdateQueueBuffer),
 		closed:        make(chan struct{}),
@@ -343,7 +350,7 @@ func (s *GopherMart) EnqueuePendingOrders(ctx context.Context) error {
 		s.enqueueOrder(n)
 	}
 
-	logger.Log.Info("незавершённые заказы поставлены в очередь",
+	s.log.Info("незавершённые заказы поставлены в очередь",
 		zap.Int("количество", len(numbers)))
 
 	return nil
@@ -364,7 +371,7 @@ func (s *GopherMart) enqueueOrder(orderNumber string) {
 	case s.accrualQueue <- orderNumber:
 		// успешно
 	default:
-		logger.Log.Warn("очередь accrual переполнена, заказ будет обработан при рестарте",
+		s.log.Warn("очередь accrual переполнена, заказ будет обработан при рестарте",
 			zap.String("заказ", orderNumber))
 	}
 }
@@ -464,7 +471,7 @@ func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string) ti
 	if err != nil {
 		var etmr *accrual.ErrTooManyRequests
 		if errors.As(err, &etmr) {
-			logger.Log.Info("превышен лимит запросов к accrual-системе, приостанавливаем воркер",
+			s.log.Info("превышен лимит запросов к accrual-системе, приостанавливаем воркер",
 				zap.String("заказ", orderNumber),
 				zap.Int("повтор_через_сек", etmr.RetryAfter))
 			delay := time.Duration(etmr.RetryAfter) * time.Second
@@ -475,13 +482,13 @@ func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string) ti
 
 		var enr *accrual.ErrNotRegistered
 		if errors.As(err, &enr) {
-			logger.Log.Debug("заказ не зарегистрирован в accrual-системе",
+			s.log.Debug("заказ не зарегистрирован в accrual-системе",
 				zap.String("заказ", orderNumber))
 			s.requeueOrder(orderNumber, s.config.AccrualRetryDelay)
 			return 0
 		}
 
-		logger.Log.Error("ошибка запроса к accrual-системе",
+		s.log.Error("ошибка запроса к accrual-системе",
 			zap.String("заказ", orderNumber),
 			zap.Error(err))
 		s.requeueOrder(orderNumber, s.config.AccrualRetryDelay)
@@ -522,10 +529,10 @@ func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string) ti
 	select {
 	case s.dbUpdateQueue <- update:
 	case <-s.closed:
-		logger.Log.Info("сервис останавливается, обновление заказа не записано в БД",
+		s.log.Info("сервис останавливается, обновление заказа не записано в БД",
 			zap.String("заказ", orderNumber))
 	case <-ctx.Done():
-		logger.Log.Info("контекст отменён, обновление заказа не записано в БД",
+		s.log.Info("контекст отменён, обновление заказа не записано в БД",
 			zap.String("заказ", orderNumber))
 	}
 
@@ -582,7 +589,7 @@ func (s *GopherMart) runBatchProcessor() {
 		flushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := s.config.Storage.BatchUpdateOrders(flushCtx, batchToStore); err != nil {
-			logger.Log.Error("ошибка пакетного обновления заказов", zap.Error(err))
+			s.log.Error("ошибка пакетного обновления заказов", zap.Error(err))
 		}
 	}
 

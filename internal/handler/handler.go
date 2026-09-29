@@ -86,15 +86,17 @@ type GopherMartService interface {
 // RouterParams содержит параметры для создания HTTP-роутера.
 type RouterParams struct {
 	Service    GopherMartService
+	Logger     *zap.Logger   // логгер для middleware и хендлеров; если nil — используется no-op
 	CookieName string        // имя cookie для JWT
 	CookieTTL  time.Duration // срок действия cookie
 	SigningKey []byte        // ключ подписи JWT
 }
 
 // NewRouterParams создаёт RouterParams из конфигурации приложения и сервиса.
-func NewRouterParams(cfg config.ApplicationConfig, svc GopherMartService) RouterParams {
+func NewRouterParams(cfg config.ApplicationConfig, svc GopherMartService, log *zap.Logger) RouterParams {
 	return RouterParams{
 		Service:    svc,
+		Logger:     log,
 		CookieName: cfg.CookieAuthName,
 		CookieTTL:  cfg.CookieAuthTTL,
 		SigningKey: cfg.SigningKey,
@@ -105,6 +107,7 @@ func NewRouterParams(cfg config.ApplicationConfig, svc GopherMartService) Router
 type Router struct {
 	mux        *chi.Mux
 	service    GopherMartService
+	log        *zap.Logger
 	cookieName string
 	cookieTTL  time.Duration
 	signingKey []byte
@@ -116,12 +119,18 @@ type Router struct {
 func NewRouter(params RouterParams) *Router {
 	r := chi.NewRouter()
 
-	r.Use(logger.WithLogging)
+	log := params.Logger
+	if log == nil {
+		log = zap.NewNop()
+	}
+
+	r.Use(logger.WithLogging(log))
 	r.Use(GzipMiddleware)
 
 	rt := &Router{
 		mux:        r,
 		service:    params.Service,
+		log:        log,
 		cookieName: params.CookieName,
 		cookieTTL:  params.CookieTTL,
 		signingKey: params.SigningKey,
@@ -199,13 +208,13 @@ func (rt *Router) register(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "логин уже занят", http.StatusConflict)
 			return
 		}
-		logger.Log.Error("ошибка регистрации", zap.Error(err))
+		rt.log.Error("ошибка регистрации", zap.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 
 	if err := setAuthCookie(w, rt.cookieName, rt.cookieTTL, rt.signingKey, strconv.FormatInt(userID, 10)); err != nil {
-		logger.Log.Error("ошибка установки cookie аутентификации", zap.Error(err))
+		rt.log.Error("ошибка установки cookie аутентификации", zap.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
@@ -244,13 +253,13 @@ func (rt *Router) login(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "неверная пара логин/пароль", http.StatusUnauthorized)
 			return
 		}
-		logger.Log.Error("ошибка аутентификации", zap.Error(err))
+		rt.log.Error("ошибка аутентификации", zap.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 
 	if err := setAuthCookie(w, rt.cookieName, rt.cookieTTL, rt.signingKey, strconv.FormatInt(userID, 10)); err != nil {
-		logger.Log.Error("ошибка установки cookie аутентификации", zap.Error(err))
+		rt.log.Error("ошибка установки cookie аутентификации", zap.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
@@ -302,7 +311,7 @@ func (rt *Router) uploadOrder(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, service.ErrOrderAlreadyExists) {
 			ownerID, ownerErr := rt.service.GetOrderByNumber(ctx, orderNumber)
 			if ownerErr != nil {
-				logger.Log.Error("ошибка определения владельца заказа", zap.Error(ownerErr))
+				rt.log.Error("ошибка определения владельца заказа", zap.Error(ownerErr))
 				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 				return
 			}
@@ -314,7 +323,7 @@ func (rt *Router) uploadOrder(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "номер заказа уже загружен другим пользователем", http.StatusConflict)
 			return
 		}
-		logger.Log.Error("ошибка загрузки заказа", zap.Error(err))
+		rt.log.Error("ошибка загрузки заказа", zap.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
@@ -338,7 +347,7 @@ func (rt *Router) listOrders(w http.ResponseWriter, r *http.Request) {
 
 	orders, err := rt.service.ListUserOrders(ctx, userID)
 	if err != nil {
-		logger.Log.Error("ошибка получения списка заказов", zap.Error(err))
+		rt.log.Error("ошибка получения списка заказов", zap.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
@@ -374,7 +383,7 @@ func (rt *Router) listOrders(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewEncoder(w).Encode(items); err != nil {
-		logger.Log.Error("ошибка кодирования ответа со списком заказов", zap.Error(err))
+		rt.log.Error("ошибка кодирования ответа со списком заказов", zap.Error(err))
 	}
 }
 
@@ -392,7 +401,7 @@ func (rt *Router) getBalance(w http.ResponseWriter, r *http.Request) {
 
 	balance, withdrawn, err := rt.service.GetBalance(ctx, userID)
 	if err != nil {
-		logger.Log.Error("ошибка получения баланса", zap.Error(err))
+		rt.log.Error("ошибка получения баланса", zap.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
@@ -409,7 +418,7 @@ func (rt *Router) getBalance(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		logger.Log.Error("ошибка кодирования ответа с балансом", zap.Error(err))
+		rt.log.Error("ошибка кодирования ответа с балансом", zap.Error(err))
 	}
 }
 
@@ -468,7 +477,7 @@ func (rt *Router) withdraw(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		logger.Log.Error("ошибка списания баллов", zap.Error(err))
+		rt.log.Error("ошибка списания баллов", zap.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
@@ -491,7 +500,7 @@ func (rt *Router) listWithdrawals(w http.ResponseWriter, r *http.Request) {
 
 	withdrawals, err := rt.service.ListWithdrawals(ctx, userID)
 	if err != nil {
-		logger.Log.Error("ошибка получения списка списаний", zap.Error(err))
+		rt.log.Error("ошибка получения списка списаний", zap.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
@@ -520,7 +529,7 @@ func (rt *Router) listWithdrawals(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewEncoder(w).Encode(items); err != nil {
-		logger.Log.Error("ошибка кодирования ответа со списком списаний", zap.Error(err))
+		rt.log.Error("ошибка кодирования ответа со списком списаний", zap.Error(err))
 	}
 }
 
@@ -531,7 +540,7 @@ func (rt *Router) pingDB(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	if err := rt.service.Ping(ctx); err != nil {
-		logger.Log.Error("ошибка проверки доступности базы данных", zap.Error(err))
+		rt.log.Error("ошибка проверки доступности базы данных", zap.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
