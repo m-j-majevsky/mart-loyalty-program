@@ -67,8 +67,8 @@ func (c *Client) GetOrderAccrual(ctx context.Context, orderNumber string) (*Orde
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			c.log.Debug("ретрай запроса к accrual-системе",
-				zap.String("заказ", orderNumber),
-				zap.Int("попытка", attempt))
+				zap.String("order", orderNumber),
+				zap.Int("attempt", attempt))
 
 			select {
 			case <-time.After(retryDelay):
@@ -144,15 +144,18 @@ func (c *Client) handleResponse(resp *http.Response, orderNumber string) (*Order
 				retryAfter = parsed
 			} else {
 				c.log.Warn("некорректное значение заголовка Retry-After, используется значение по умолчанию",
-					zap.String("заказ", orderNumber),
+					zap.String("order", orderNumber),
 					zap.String("retry_after", v),
 					zap.Error(err),
-					zap.Int("по_умолчанию_сек", retryAfter))
+					zap.Int("default_sec", retryAfter))
 			}
 		}
 		return nil, true, NewErrTooManyRequests(retryAfter)
 
 	default:
+		// Дренирование тела ответа, чтобы HTTP-клиент
+		// мог переиспользовать TCP-соединение при ретраях.
+		io.Copy(io.Discard, resp.Body)
 		return nil, false, fmt.Errorf("неожиданный код ответа от accrual-системы: %d", resp.StatusCode)
 	}
 }
