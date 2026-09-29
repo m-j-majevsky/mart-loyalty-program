@@ -5,7 +5,8 @@
 -- balance и withdrawn ведут текущий баланс и суммарное списание баллов.
 CREATE TABLE IF NOT EXISTS users (
     id            BIGSERIAL     PRIMARY KEY,
-    login         TEXT          NOT NULL UNIQUE,
+    login         TEXT          NOT NULL,
+    CONSTRAINT users_login_key UNIQUE (login),
     password_hash TEXT          NOT NULL,
     balance       NUMERIC(12,2) NOT NULL DEFAULT 0,
     withdrawn     NUMERIC(12,2) NOT NULL DEFAULT 0,
@@ -18,7 +19,8 @@ CREATE TABLE IF NOT EXISTS users (
 -- accrual — начисленные баллы (заполняется при переходе в PROCESSED).
 CREATE TABLE IF NOT EXISTS orders (
     id          BIGSERIAL     PRIMARY KEY,
-    number      TEXT          NOT NULL UNIQUE,
+    number      TEXT          NOT NULL,
+    CONSTRAINT orders_number_key UNIQUE (number),
     user_id     BIGINT        NOT NULL REFERENCES users(id),
     status      TEXT          NOT NULL DEFAULT 'NEW',
     accrual     NUMERIC(12,2) NOT NULL DEFAULT 0,

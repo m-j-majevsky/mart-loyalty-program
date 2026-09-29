@@ -34,6 +34,12 @@ func NewPgStorage(db dbtx) *pgStorage {
 	return &pgStorage{db: db}
 }
 
+// Имена проверяемых ограничений слоя PostgreSQL.
+const (
+	constraintUsersLoginKey   = "users_login_key"
+	constraintOrdersNumberKey = "orders_number_key"
+)
+
 // CreateUser регистрирует нового пользователя с указанными логином и хешем пароля.
 // Возвращает ID созданного пользователя.
 // Если логин уже занят, возвращает ErrLoginTaken.
@@ -46,7 +52,8 @@ func (s *pgStorage) CreateUser(ctx context.Context, login, passwordHash string) 
 	err := s.db.QueryRow(ctx, q, login, passwordHash).Scan(&id)
 	if err != nil {
 		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
+		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation &&
+			pgErr.ConstraintName == constraintUsersLoginKey {
 			return 0, NewErrLoginTaken(login)
 		}
 		return 0, fmt.Errorf("ошибка создания пользователя: %w", err)
@@ -83,7 +90,8 @@ func (s *pgStorage) CreateOrder(ctx context.Context, number string, userID int64
 	_, err := s.db.Exec(ctx, q, number, userID)
 	if err != nil {
 		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
+		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation &&
+			pgErr.ConstraintName == constraintOrdersNumberKey {
 			return NewErrOrderAlreadyExists(number)
 		}
 		return fmt.Errorf("ошибка создания заказа: %w", err)
@@ -193,7 +201,8 @@ func (s *pgStorage) WithdrawPoints(ctx context.Context, userID int64, orderNo st
     `, orderNo, userID)
 	if err != nil {
 		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation {
+		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation &&
+			pgErr.ConstraintName == constraintOrdersNumberKey {
 			return NewErrOrderAlreadyExists(orderNo)
 		}
 		return fmt.Errorf("ошибка создания заказа при списании: %w", err)
