@@ -44,6 +44,7 @@ func main() {
 	mainLogger := parentLogger.With(zap.String(component, "main"))
 	handlerLogger := parentLogger.With(zap.String(component, "handler"))
 	serviceLogger := parentLogger.With(zap.String(component, "service"))
+	accrualLogger := parentLogger.With(zap.String(component, "accrual"))
 
 	// Контекст с возможностью отмены по сигналу ОС
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -65,7 +66,7 @@ func main() {
 	storage := repository.NewPgStorage(pool)
 
 	// Создаём клиент accrual-системы
-	accrualClient := accrual.NewClient(cfg.AccrualSystemAddress)
+	accrualClient := accrual.NewClient(cfg.AccrualSystemAddress, accrualLogger)
 
 	// Создаём сервис
 	svcConfig := service.DefaultServiceConfig()
