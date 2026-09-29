@@ -67,12 +67,12 @@ func WithLogging(log *zap.Logger) func(http.Handler) http.Handler {
 			h.ServeHTTP(&lw, r)
 			duration := time.Since(start)
 
-			log.Info("HTTP-запрос",
+			log.Info("HTTP-request",
 				zap.String("uri", r.RequestURI),
-				zap.String("метод", r.Method),
-				zap.Int("статус", responseData.status),
-				zap.Int("размер", responseData.size),
-				zap.Duration("длительность", duration),
+				zap.String("method", r.Method),
+				zap.Int("status", responseData.status),
+				zap.Int("size", responseData.size),
+				zap.Duration("duration", duration),
 			)
 		}
 		return http.HandlerFunc(logFn)
