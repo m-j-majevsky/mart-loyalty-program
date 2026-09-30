@@ -43,6 +43,10 @@ type Claims struct {
 // GenerateUserIDJWT создаёт подписанный JWT-токен с userID и сроком действия ttl,
 // используя секретный ключ jwtSecret. Возвращает строку токена или ошибку.
 func GenerateUserIDJWT(userID string, ttl time.Duration, jwtSecret []byte) (string, error) {
+	if len(jwtSecret) == 0 {
+		return "", fmt.Errorf("пустой секретный ключ")
+	}
+
 	claims := Claims{
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(ttl)),
