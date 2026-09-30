@@ -488,7 +488,9 @@ func (s *GopherMart) accrualWorkerLoop(ctx context.Context, workerID int, pauseU
 			} else {
 				// Пауза истекла — сбрасываем в 0, чтобы при следующей
 				// итерации пропустить проверку.
-				pauseUntil.Store(0)
+				// CAS гарантирует, что мы не перезапишем новую паузу,
+				// установленную другим воркером между Load и Store.
+				pauseUntil.CompareAndSwap(pause, 0)
 			}
 		}
 
@@ -499,6 +501,27 @@ func (s *GopherMart) accrualWorkerLoop(ctx context.Context, workerID int, pauseU
 			return
 
 		case orderNumber := <-s.accrualQueue:
+			// Проверяем паузу после чтения из очереди: пока воркер был
+			// заблокирован на чтении, другой воркер мог получить 429
+			// и установить pauseUntil. Если пауза активна — возвращаем
+			// заказ в очередь с короткой задержкой и ждём.
+			if pause := pauseUntil.Load(); pause > 0 {
+				now := time.Now().UnixNano()
+				if now < pause {
+					s.requeueOrder(orderNumber, time.Duration(pause-now))
+					// Ждём до истечения паузы, но не дольше чем живёт контекст/closed.
+					wait := time.Duration(pause - now)
+					select {
+					case <-time.After(wait):
+					case <-s.closed:
+						return
+					case <-ctx.Done():
+						return
+					}
+					continue
+				}
+			}
+
 			s.processOneOrder(ctx, workerID, orderNumber, pauseUntil)
 
 			// Задержка между запросами к accrual-системе (per-worker).

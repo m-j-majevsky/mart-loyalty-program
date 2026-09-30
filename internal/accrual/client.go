@@ -140,13 +140,18 @@ func (c *Client) handleResponse(resp *http.Response, orderNumber string) (*Order
 	case http.StatusTooManyRequests:
 		retryAfter := 1
 		if v := resp.Header.Get("Retry-After"); v != "" {
-			if parsed, err := strconv.Atoi(v); err == nil {
+			if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
 				retryAfter = parsed
-			} else {
+			} else if err != nil {
 				c.log.Warn("некорректное значение заголовка Retry-After, используется значение по умолчанию",
 					zap.String("order", orderNumber),
 					zap.String("retry_after", v),
 					zap.Error(err),
+					zap.Int("default_sec", retryAfter))
+			} else if parsed <= 0 {
+				c.log.Warn("Retry-After <= 0, используется значение по умолчанию",
+					zap.String("order", orderNumber),
+					zap.Int("retry_after", parsed),
 					zap.Int("default_sec", retryAfter))
 			}
 		}

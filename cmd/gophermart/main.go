@@ -66,6 +66,31 @@ func main() {
 		mainLogger.Fatal("ошибка выполнения миграций", zap.Error(err))
 	}
 
+	// Запрещаем параллельный запуск второго инстанса.
+	// pg_try_advisory_lock — session-level: держится, пока жив коннект.
+	// При падении процесса коннект рвётся, PostgreSQL автоматически снимает lock.
+	const instanceLockKey = 20240930
+	lockConn, err := pool.Acquire(ctx)
+	if err != nil {
+		mainLogger.Fatal("не удалось получить коннект для instance lock", zap.Error(err))
+	}
+
+	var locked bool
+	err = lockConn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", instanceLockKey).Scan(&locked)
+	if err != nil {
+		lockConn.Release()
+		mainLogger.Fatal("ошибка запроса instance lock", zap.Error(err))
+	}
+	if !locked {
+		lockConn.Release()
+		mainLogger.Fatal("другой инстанс gophermart уже запущен — запуск отменён")
+	}
+	mainLogger.Info("instance lock acquired")
+	defer func() {
+		lockConn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", instanceLockKey)
+		lockConn.Release()
+	}()
+
 	// Создаём хранилище
 	storage := repository.NewPgStorage(pool)
 

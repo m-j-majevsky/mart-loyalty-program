@@ -611,9 +611,9 @@ func TestHandleResponse_RetryAfterValues(t *testing.T) {
 			expected:   30,
 		},
 		{
-			name:       "zero value",
+			name:       "zero value — default 1",
 			retryAfter: "0",
-			expected:   0,
+			expected:   1,
 		},
 		{
 			name:       "empty header — default 1",

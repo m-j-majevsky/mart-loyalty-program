@@ -127,7 +127,7 @@ func GzipMiddleware(h http.Handler) http.Handler {
 		if strings.Contains(contentEncoding, "gzip") {
 			cr, err := newCompressReader(r.Body)
 			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
+				http.Error(w, "невалидное gzip-тело запроса", http.StatusBadRequest)
 				return
 			}
 			r.Body = cr

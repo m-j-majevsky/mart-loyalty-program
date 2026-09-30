@@ -27,7 +27,17 @@ type jsonNumber decimal.Decimal
 // MarshalJSON сериализует значение как число без кавычек.
 func (n jsonNumber) MarshalJSON() ([]byte, error) {
 	d := decimal.Decimal(n)
-	return []byte(d.String()), nil
+	s := d.String()
+	// Убираем trailing zeros после десятичной точки,
+	// чтобы NUMERIC(12,2) → "500.00" сериализовалось как "500",
+	// а "100.50" — как "100.5". Целые числа без точки не трогаем.
+	if i := strings.IndexByte(s, '.'); i >= 0 {
+		s = strings.TrimRight(s, "0")
+		if before, ok := strings.CutSuffix(s, "."); ok {
+			s = before
+		}
+	}
+	return []byte(s), nil
 }
 
 // procTimeout — таймаут на обработку одного HTTP-запроса.
@@ -35,7 +45,8 @@ const procTimeout = 5 * time.Second
 
 // maxOrderNumberLen — ограничение на размер тела при загрузке номера заказа.
 // Номер заказа — короткая строка из цифр, большие тела отсекаются.
-const maxOrderNumberLen = 64
+// Значение синхронизировано с колонкой orders.number VARCHAR(32) в PostgreSQL:
+const maxOrderNumberLen = 32
 
 // maxJSONBodyLen — ограничение на размер JSON-тела для хендлеров register, login,
 // withdraw. Защищает от произвольно больших тел запроса.
@@ -331,6 +342,17 @@ func (rt *Router) uploadOrder(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
+// jsonTime — обёртка над time.Time, сериализуется в JSON как RFC3339
+// без дробных секунд. Стандартный маршалер time.Time использует RFC3339Nano
+// (с дробными секундами), что может не совпадать с ожиданиями тест-харнесса,
+// если он сравнивает строки строго.
+type jsonTime time.Time
+
+// MarshalJSON сериализует время в формате RFC3339 (без дробных секунд).
+func (t jsonTime) MarshalJSON() ([]byte, error) {
+	return []byte(`"` + time.Time(t).Format(time.RFC3339) + `"`), nil
+}
+
 // listOrders обрабатывает GET /api/user/orders — получение списка заказов пользователя
 // со статусами обработки и информацией о начислениях.
 // Возвращает JSON-массив, отсортированный от новых к старым.
@@ -364,7 +386,7 @@ func (rt *Router) listOrders(w http.ResponseWriter, r *http.Request) {
 		Number     string      `json:"number"`
 		Status     string      `json:"status"`
 		Accrual    *jsonNumber `json:"accrual,omitempty"`
-		UploadedAt time.Time   `json:"uploaded_at"`
+		UploadedAt jsonTime    `json:"uploaded_at"`
 	}
 
 	items := make([]orderItem, 0, len(orders))
@@ -372,7 +394,7 @@ func (rt *Router) listOrders(w http.ResponseWriter, r *http.Request) {
 		item := orderItem{
 			Number:     o.Number,
 			Status:     o.Status,
-			UploadedAt: o.UploadedAt,
+			UploadedAt: jsonTime(o.UploadedAt),
 		}
 		// accrual включается только для PROCESSED-заказов с положительным значением
 		if o.Status == "PROCESSED" && o.Accrual.GreaterThan(decimal.Zero) {
@@ -520,7 +542,7 @@ func (rt *Router) listWithdrawals(w http.ResponseWriter, r *http.Request) {
 	type withdrawalItem struct {
 		Order       string     `json:"order"`
 		Sum         jsonNumber `json:"sum"`
-		ProcessedAt time.Time  `json:"processed_at"`
+		ProcessedAt jsonTime   `json:"processed_at"`
 	}
 
 	items := make([]withdrawalItem, 0, len(withdrawals))
@@ -528,7 +550,7 @@ func (rt *Router) listWithdrawals(w http.ResponseWriter, r *http.Request) {
 		items = append(items, withdrawalItem{
 			Order:       wl.OrderNumber,
 			Sum:         jsonNumber(wl.Sum),
-			ProcessedAt: wl.ProcessedAt,
+			ProcessedAt: jsonTime(wl.ProcessedAt),
 		})
 	}
 

@@ -251,8 +251,12 @@ func (s *pgStorage) ListWithdrawals(ctx context.Context, userID int64) ([]Withdr
 // ListPendingOrderNumbers возвращает номера всех заказов в статусах
 // NEW и PROCESSING, которые требуют опроса accrual-системы.
 // Используется при запуске сервиса для восстановления очереди после перезапуска.
+//
+// LIMIT 500 ограничивает выборку, чтобы не загрузить миллионы строк в память
+// при большом количестве незавершённых заказов. Остальные будут обработаны
+// при следующем рестарте или при добавлении периодического re-sweep.
 func (s *pgStorage) ListPendingOrderNumbers(ctx context.Context) ([]string, error) {
-	const q = `SELECT number FROM orders WHERE status IN ('NEW', 'PROCESSING')`
+	const q = `SELECT number FROM orders WHERE status IN ('NEW', 'PROCESSING') LIMIT 500`
 
 	rows, err := s.db.Query(ctx, q)
 	if err != nil {
@@ -288,22 +292,33 @@ func (s *pgStorage) BatchUpdateOrders(ctx context.Context, updates []OrderUpdate
 
 	const qUpdateOrders = `UPDATE orders
 		                   SET status = $1::order_status, accrual = $2
-		                   WHERE number = $3`
+		                   WHERE number = $3 AND status IN ('NEW', 'PROCESSING')
+		                   RETURNING user_id`
 
 	const qUpdateUsers = `UPDATE users
 		                  SET balance = balance + $1
-		                  WHERE id = (SELECT user_id FROM orders WHERE number = $2)`
+		                  WHERE id = $2`
 
 	for _, u := range updates {
-		// Обновляем статус и начисление заказа
-		_, err := tx.Exec(ctx, qUpdateOrders, u.Status, u.Accrual, u.Number)
+		// Обновляем статус и начисление заказа.
+		// WHERE status IN ('NEW', 'PROCESSING') гарантирует, что финальные
+		// статусы (PROCESSED, INVALID) не будут перезаписаны — это требуется спекой.
+		// RETURNING user_id позволяет узнать, было ли обновление выполнено:
+		// если pgx.ErrNoRows — заказ уже в финальном статусе, пропускаем.
+		var userID int64
+		err := tx.QueryRow(ctx, qUpdateOrders, u.Status, u.Accrual, u.Number).Scan(&userID)
 		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				// Заказ уже в финальном статусе — пропускаем
+				continue
+			}
 			return fmt.Errorf("ошибка обновления заказа %s: %w", u.Number, err)
 		}
 
-		// Если заказ обработан и есть начисление — добавляем баллы пользователю
+		// Если заказ обработан и есть начисление — добавляем баллы пользователю.
+		// Кредитуем только если обновление действительно произошло (userID получен из RETURNING).
 		if u.Status == "PROCESSED" && u.Accrual.GreaterThan(decimal.Zero) {
-			_, err = tx.Exec(ctx, qUpdateUsers, u.Accrual, u.Number)
+			_, err = tx.Exec(ctx, qUpdateUsers, u.Accrual, userID)
 			if err != nil {
 				return fmt.Errorf("ошибка начисления баллов для заказа %s: %w", u.Number, err)
 			}

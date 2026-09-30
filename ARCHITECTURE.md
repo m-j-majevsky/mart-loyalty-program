@@ -29,6 +29,7 @@
   - [Batch Processor](#batch-processor)
   - [Graceful shutdown](#graceful-shutdown)
   - [Startup-sweep](#startup-sweep)
+  - [Single-instance enforcement](#single-instance-enforcement)
 
 ---
 
@@ -153,7 +154,7 @@ PostgreSQL проверяет корректность значения на у�
 ### `POST /api/user/orders` — загрузка номера заказа
 
 1. Извлечение ID пользователя из контекста (через middleware `RequireAuth`).
-2. Чтение тела запроса как `text/plain` (макс. 64 байта). `strings.TrimSpace` убирает trailing newline.
+2. Чтение тела запроса как `text/plain` (макс. 32 байта). `strings.TrimSpace` убирает trailing newline.
 3. Проверка непустоты — 400 при пустом.
 4. Проверка номера по алгоритму Луна — 422 при неуспехе.
 5. Вызов `service.UploadOrder`: попытка INSERT в таблицу `orders`.
@@ -270,7 +271,7 @@ N воркеров (`AccrualWorkerCount`, по умолчанию 5) читаю�
 
 Сброс — синхронный (без отдельной горутины), гарантирует порядок записи. Использует свежий контекст с таймаутом `flushTimeout` (10 секунд, константа) — финальный батч при остановке не потеряется даже если основной контекст отменён.
 
-`BatchUpdateOrders` выполняет все обновления в одной транзакции: `UPDATE orders SET status = $1::order_status, accrual = $2 WHERE number = $3` (с явным cast для enum), а для `PROCESSED` с положительным accrual — дополнительный `UPDATE users SET balance = balance + accrual`. Запросы выполняются без прекомпиляции, поскольку для коротких батчей (до 128 элементов) overhead от Prepare может превысить выгоду.
+`BatchUpdateOrders` выполняет все обновления в одной транзакции: `UPDATE orders SET status = $1::order_status, accrual = $2 WHERE number = $3 AND status IN ('NEW', 'PROCESSING') RETURNING user_id` — условие `status IN ('NEW', 'PROCESSING')` защищает финальные статусы (`PROCESSED`, `INVALID`) от перезаписи (требование спеки), а `RETURNING user_id` позволяет кредентовать баланс только при успешном обновлении (идемпотентность). Для `PROCESSED` с положительным accrual — дополнительный `UPDATE users SET balance = balance + accrual WHERE id = $userID` (userID из `RETURNING`). Запросы выполняются без прекомпиляции, поскольку для коротких батчей (до 128 элементов) overhead от Prepare может превысить выгоду.
 
 ### Graceful shutdown
 
@@ -286,4 +287,10 @@ N воркеров (`AccrualWorkerCount`, по умолчанию 5) читаю�
 
 ### Startup-sweep
 
-При запуске `EnqueuePendingOrders` выбирает из БД заказы в статусах `NEW` и `PROCESSING` и ставит их в `accrualQueue`. Это гарантирует, что заказы, не дошедшие до accrual при предыдущей остановке, не потеряются.
+При запуске `EnqueuePendingOrders` выбирает из БД заказы в статусах `NEW` и `PROCESSING` (с `LIMIT 500`, чтобы не загрузить миллионы строк в память) и ставит их в `accrualQueue`. Это гарантирует, что заказы, не дошедшие до accrual при предыдущей остановке, не потеряются. Заказы, не попавшие в первые 500, будут обработаны при следующем рестарте.
+
+**Ограничение: периодический re-sweep не реализован.** Startup-sweep выполняется только один раз при старте. Если в процессе работы новые заказы не попадают в `accrualQueue` (например, канал переполнен и `enqueueOrder` срабатывает ветка `default`), они останутся в БД со статусом `NEW` и будут обработаны только при следующем рестарте. Аналогично, заказы в статусе `PROCESSING`, для которых `processOneOrder` вернул ошибку сети или 5xx после всех ретраев, переотправляются через `requeueOrder` с задержкой — но если `requeueOrder` не срабатывает (процесс упал до срабатывания `time.AfterFunc`), они также будут подхвачены только при следующем startup-sweep. Это осознанный компромисс: простота реализации вместо гарантий своевременной обработки при длительной работе без рестарта.
+
+### Single-instance enforcement
+
+Данное решение не будет корректно работать при горизонтальном масштабировании, поэтому для предотвращения запуска нескольких инстансов сервиса в `main.go` после миграций выполняется `pg_try_advisory_lock(20240930)` через пиннинг коннекта из пула (`pool.Acquire`). Если блокировка не получена — процесс завершается с ошибкой «другой инстанс gophermart уже запущен». Блокировка session-level: снимается автоматически при разрыве коннекта (падение процесса) или явно через `pg_advisory_unlock` при graceful shutdown.

@@ -765,11 +765,11 @@ func (s *PgStorageTestSuite) TestBatchUpdateOrders_ProcessedWithAccrual() {
 
 	accrual := decimal.NewFromFloat(500)
 	mock.ExpectBegin()
-	mock.ExpectExec("UPDATE orders").
+	mock.ExpectQuery("UPDATE orders").
 		WithArgs("PROCESSED", accrual, "123").
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"user_id"}).AddRow(int64(1)))
 	mock.ExpectExec("UPDATE users").
-		WithArgs(accrual, "123").
+		WithArgs(accrual, int64(1)).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
 
@@ -787,9 +787,9 @@ func (s *PgStorageTestSuite) TestBatchUpdateOrders_NonProcessedStatus() {
 	mock, storage := s.newMockStorage()
 
 	mock.ExpectBegin()
-	mock.ExpectExec("UPDATE orders").
+	mock.ExpectQuery("UPDATE orders").
 		WithArgs("PROCESSING", decimal.Zero, "456").
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"user_id"}).AddRow(int64(1)))
 	mock.ExpectCommit()
 
 	err := storage.BatchUpdateOrders(context.Background(), []OrderUpdate{
@@ -806,9 +806,9 @@ func (s *PgStorageTestSuite) TestBatchUpdateOrders_ProcessedZeroAccrual() {
 	mock, storage := s.newMockStorage()
 
 	mock.ExpectBegin()
-	mock.ExpectExec("UPDATE orders").
+	mock.ExpectQuery("UPDATE orders").
 		WithArgs("PROCESSED", decimal.Zero, "789").
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"user_id"}).AddRow(int64(1)))
 	mock.ExpectCommit()
 
 	err := storage.BatchUpdateOrders(context.Background(), []OrderUpdate{
@@ -828,20 +828,20 @@ func (s *PgStorageTestSuite) TestBatchUpdateOrders_MultipleUpdates() {
 	accrual1 := decimal.NewFromFloat(500)
 	mock.ExpectBegin()
 	// Первый заказ: PROCESSED с начислением
-	mock.ExpectExec("UPDATE orders").
+	mock.ExpectQuery("UPDATE orders").
 		WithArgs("PROCESSED", accrual1, "123").
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"user_id"}).AddRow(int64(1)))
 	mock.ExpectExec("UPDATE users").
-		WithArgs(accrual1, "123").
+		WithArgs(accrual1, int64(1)).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	// Второй заказ: PROCESSING без начисления
-	mock.ExpectExec("UPDATE orders").
+	mock.ExpectQuery("UPDATE orders").
 		WithArgs("PROCESSING", decimal.Zero, "456").
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"user_id"}).AddRow(int64(2)))
 	// Третий заказ: PROCESSED с нулевым начислением
-	mock.ExpectExec("UPDATE orders").
+	mock.ExpectQuery("UPDATE orders").
 		WithArgs("PROCESSED", decimal.Zero, "789").
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"user_id"}).AddRow(int64(3)))
 	mock.ExpectCommit()
 
 	err := storage.BatchUpdateOrders(context.Background(), []OrderUpdate{
@@ -874,7 +874,7 @@ func (s *PgStorageTestSuite) TestBatchUpdateOrders_UpdateError() {
 
 	accrual := decimal.NewFromFloat(500)
 	mock.ExpectBegin()
-	mock.ExpectExec("UPDATE orders").
+	mock.ExpectQuery("UPDATE orders").
 		WithArgs("PROCESSED", accrual, "123").
 		WillReturnError(errors.New("update failed"))
 	mock.ExpectRollback()
@@ -893,11 +893,11 @@ func (s *PgStorageTestSuite) TestBatchUpdateOrders_CommitError() {
 
 	accrual := decimal.NewFromFloat(500)
 	mock.ExpectBegin()
-	mock.ExpectExec("UPDATE orders").
+	mock.ExpectQuery("UPDATE orders").
 		WithArgs("PROCESSED", accrual, "123").
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"user_id"}).AddRow(int64(1)))
 	mock.ExpectExec("UPDATE users").
-		WithArgs(accrual, "123").
+		WithArgs(accrual, int64(1)).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit().WillReturnError(errors.New("commit failed"))
 

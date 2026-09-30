@@ -173,14 +173,14 @@ func TestGzipMiddleware_NoGzip(t *testing.T) {
 	assert.Equal(t, "response:plain", rr.Body.String())
 }
 
-// TestGzipMiddleware_InvalidGzipRequest проверяет, что некорректное gzip-тело возвращает 500.
+// TestGzipMiddleware_InvalidGzipRequest проверяет, что некорректное gzip-тело возвращает 400.
 func TestGzipMiddleware_InvalidGzipRequest(t *testing.T) {
 	handler := GzipMiddleware(gzipMiddlewareHandler())
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("not gzip"))
 	req.Header.Set("Content-Encoding", "gzip")
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
-	assert.Equal(t, http.StatusInternalServerError, rr.Code)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
 }
 
 // -----------------------------------------------------------------------------
