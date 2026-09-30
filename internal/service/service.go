@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/m-j-majevsky/gophermart/internal/accrual"
@@ -132,10 +133,11 @@ type ServiceConfig struct {
 	AccrualClient        AccrualClient // клиент accrual-системы
 	BcryptCost           int           // стоимость bcrypt (10–14)
 	AccrualQueueBuffer   int           // размер канала очереди запросов в accrual
+	AccrualWorkerCount   int           // число воркеров для параллельного опроса accrual
 	DBUpdateQueueBuffer  int           // размер канала очереди обновлений в БД
 	DBUpdateBatchSize    int           // максимальный размер батча обновления БД
 	DBUpdateFlushTimeout time.Duration // период сброса батча в БД
-	AccrualPollInterval  time.Duration // задержка между запросами к accrual
+	AccrualPollInterval  time.Duration // задержка между запросами к accrual (per-worker)
 	AccrualRetryDelay    time.Duration // задержка перед повторным опросом accrual о заказе в нефинальном статусе
 	Logger               *zap.Logger   // логгер; если nil — используется no-op
 }
@@ -146,6 +148,7 @@ func DefaultServiceConfig() ServiceConfig {
 	return ServiceConfig{
 		BcryptCost:           12,
 		AccrualQueueBuffer:   2048,
+		AccrualWorkerCount:   5,
 		DBUpdateQueueBuffer:  512,
 		DBUpdateBatchSize:    128,
 		DBUpdateFlushTimeout: 200 * time.Millisecond,
@@ -166,8 +169,8 @@ func DefaultServiceConfig() ServiceConfig {
 // Канал accrualQueue намеренно НЕ закрывается при остановке —
 // это предотвращает panic в горутинах requeueOrder (time.AfterFunc),
 // которые могут сработать после StopAccrualProcessor.
-// Вместо этого воркер выходит по сигналу closed и закрывает dbUpdateQueue,
-// что каскадно останавливает batch processor.
+// Вместо этого воркеры выходят по сигналу closed и родительская
+// горутина закрывает dbUpdateQueue, что каскадно останавливает batch processor.
 type GopherMart struct {
 	config        ServiceConfig
 	log           *zap.Logger                 // логгер для сервиса
@@ -191,6 +194,12 @@ func NewGopherMart(cfg ServiceConfig) (*GopherMart, error) {
 	log := cfg.Logger
 	if log == nil {
 		log = zap.NewNop()
+	}
+
+	// Гарантируем минимум 1 воркер.
+	workerCount := cfg.AccrualWorkerCount
+	if workerCount < 1 {
+		workerCount = 1
 	}
 
 	return &GopherMart{
@@ -372,14 +381,16 @@ func (s *GopherMart) enqueueOrder(orderNumber string) {
 		// успешно
 	default:
 		s.log.Warn("очередь accrual переполнена, заказ будет обработан при рестарте",
-			zap.String("заказ", orderNumber))
+			zap.String("order", orderNumber))
 	}
 }
 
-// StartAccrualProcessor запускает две фоновые горутины:
-// 1. Accrual worker — опрашивает accrual-систему для заказов из accrualQueue;
-// 2. Batch processor — накапливает и пакетно записывает обновления в БД.
-// Обе горутины останавливаются при отмене контекста ctx или закрытии closed.
+// StartAccrualProcessor запускает фоновые горутины обработки начислений:
+//  1. N accrual-воркеров — параллельно опрашивают accrual-систему для заказов
+//     из accrualQueue (паттерн Worker Pool);
+//  2. Batch processor — накапливает и пакетно записывает обновления в БД.
+//
+// Все горутины останавливаются при отмене контекста ctx или закрытии closed.
 // Вызывающий код должен дождаться завершения через WaitGroup.
 func (s *GopherMart) StartAccrualProcessor(ctx context.Context) {
 	var wg sync.WaitGroup
@@ -387,7 +398,7 @@ func (s *GopherMart) StartAccrualProcessor(ctx context.Context) {
 
 	go func() {
 		defer wg.Done()
-		s.runAccrualWorker(ctx)
+		s.runAccrualWorkerPool(ctx)
 	}()
 
 	go func() {
@@ -402,8 +413,9 @@ func (s *GopherMart) StartAccrualProcessor(ctx context.Context) {
 // Использует sync.Once для гарантии однократного закрытия:
 // закрывает сигнальный канал closed, что запрещает новые отправки
 // в accrualQueue (все отправители проверяют closed перед записью).
-// Accrual worker видит закрытие closed, закрывает dbUpdateQueue и завершается.
-// Batch processor видит закрытие dbUpdateQueue, сбрасывает остаток батча и завершается.
+// Accrual-воркеры видят закрытие closed и завершаются.
+// Родительская горутина runAccrualWorkerPool дожидается всех воркеров
+// и закрывает dbUpdateQueue для каскадной остановки batch processor.
 //
 // Канал accrualQueue намеренно НЕ закрывается — это предотвращает panic
 // при записи из callback-функций time.AfterFunc в requeueOrder,
@@ -414,21 +426,70 @@ func (s *GopherMart) StopAccrualProcessor() {
 	})
 }
 
-// runAccrualWorker читает номера заказов из accrualQueue и опрашивает
-// accrual-систему. Для каждого заказа:
-//   - при получении ответа с кодом 200 — отправляет обновление в dbUpdateQueue;
-//   - при нефинальном статусе (REGISTERED, PROCESSING) или неизвестном статусе
-//     (маппится на PROCESSING) — переотправляет заказ в очередь через AccrualRetryDelay;
-//   - при коде 204 (не зарегистрирован) — переотправляет через AccrualRetryDelay;
-//   - при коде 429 — полная остановка на Retry-After.
+// runAccrualWorkerPool — родительская горутина, управляющая пулом воркеров.
+// Запускает N воркеров (AccrualWorkerCount), каждый из которых читает
+// заказы из accrualQueue и параллельно опрашивает accrual-систему.
 //
-// Между запросами выдерживается AccrualPollInterval.
-// Воркер завершается при закрытии closed или отмене ctx,
-// после чего закрывает dbUpdateQueue для каскадной остановки batch processor.
-func (s *GopherMart) runAccrualWorker(ctx context.Context) {
-	defer close(s.dbUpdateQueue)
+// Все воркеры разделяют общую переменную pauseUntil (atomic.Int64),
+// хранящую Unix-наносекунды — timestamp, до которого отправка запросов
+// приостановлена. При получении 429 любой воркер устанавливает pauseUntil,
+// и остальные воркеры видят паузу перед своим следующим запросом.
+//
+// После завершения всех воркеров (по closed или ctx.Done) родительская
+// горутина закрывает dbUpdateQueue, что каскадно останавливает batch processor.
+func (s *GopherMart) runAccrualWorkerPool(ctx context.Context) {
+	workerCount := s.config.AccrualWorkerCount
+	if workerCount < 1 {
+		workerCount = 1
+	}
 
+	// Общая пауза для всех воркеров: Unix-наносекунды, до которых
+	// отправка запросов к accrual-системе приостановлена.
+	// Значение 0 означает, что паузы нет.
+	var pauseUntil atomic.Int64
+
+	var wg sync.WaitGroup
+	wg.Add(workerCount)
+
+	s.log.Info("запуск пула accrual-воркеров",
+		zap.Int("workers", workerCount))
+
+	for i := 0; i < workerCount; i++ {
+		go func(workerID int) {
+			defer wg.Done()
+			s.accrualWorkerLoop(ctx, workerID, &pauseUntil)
+		}(i)
+	}
+
+	wg.Wait()
+	close(s.dbUpdateQueue)
+}
+
+// accrualWorkerLoop — один воркер пула. Читает номера заказов из accrualQueue
+// и опрашивает accrual-систему. Перед каждым запросом проверяет pauseUntil:
+// если текущее время раньше сохранённого timestamp — ждёт до него.
+// Между запросами выдерживает AccrualPollInterval (per-worker).
+//
+// Воркер завершается при закрытии closed или отмене ctx.
+func (s *GopherMart) accrualWorkerLoop(ctx context.Context, workerID int, pauseUntil *atomic.Int64) {
 	for {
+		// Проверка общей паузы (например, после 429 от другого воркера).
+		// Если pauseUntil больше текущего времени — ждём до него,
+		// но не дольше, чем живёт контекст и не закрыт closed.
+		if pause := pauseUntil.Load(); pause > 0 {
+			now := time.Now().UnixNano()
+			if now < pause {
+				wait := time.Duration(pause - now)
+				select {
+				case <-time.After(wait):
+				case <-s.closed:
+					return
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+
 		select {
 		case <-s.closed:
 			return
@@ -436,18 +497,14 @@ func (s *GopherMart) runAccrualWorker(ctx context.Context) {
 			return
 
 		case orderNumber := <-s.accrualQueue:
-			delay := s.processOneOrder(ctx, orderNumber)
+			s.processOneOrder(ctx, orderNumber, pauseUntil)
 
-			// Задержка между запросами к accrual-системе.
-			// При 429 — полная остановка на Retry-After (delay > 0),
-			// иначе — стандартный AccrualPollInterval.
-			wait := s.config.AccrualPollInterval
-			if delay > 0 {
-				wait = delay
-			}
-
+			// Задержка между запросами к accrual-системе (per-worker).
+			// При 429 пауза устанавливается через pauseUntil и проверяется
+			// в начале следующей итерации, поэтому здесь используется
+			// только стандартный AccrualPollInterval.
 			select {
-			case <-time.After(wait):
+			case <-time.After(s.config.AccrualPollInterval):
 			case <-s.closed:
 				return
 			case <-ctx.Done():
@@ -461,38 +518,50 @@ func (s *GopherMart) runAccrualWorker(ctx context.Context) {
 // При ошибке или нефинальном статусе заказ переотправляется в очередь через
 // requeueOrder с соответствующей задержкой.
 //
-// Возвращает задержку, на которую воркер должен приостановиться перед следующим
-// запросом к accrual-системе:
-//   - 0 — использовать стандартный AccrualPollInterval;
-//   - >0 — при 429: воркер полностью останавливается на указанный срок (Retry-After),
-//     чтобы не получить бан от accrual-системы.
-func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string) time.Duration {
+// При получении 429 устанавливает pauseUntil в время now + Retry-After,
+// чтобы все воркеры приостановились. Если другой воркер уже установил
+// более позднюю паузу — сохраняется максимальное значение (через CAS-цикл).
+func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string, pauseUntil *atomic.Int64) {
 	resp, err := s.config.AccrualClient.GetOrderAccrual(ctx, orderNumber)
 	if err != nil {
 		var etmr *accrual.ErrTooManyRequests
 		if errors.As(err, &etmr) {
-			s.log.Info("превышен лимит запросов к accrual-системе, приостанавливаем воркер",
-				zap.String("заказ", orderNumber),
-				zap.Int("повтор_через_сек", etmr.RetryAfter))
-			delay := time.Duration(etmr.RetryAfter) * time.Second
-			s.requeueOrder(orderNumber, delay)
-			// Возвращаем задержку, чтобы воркер полностью остановился на Retry-After
-			return delay
+			// Вычисляем timestamp конца паузы и сохраняем в pauseUntil.
+			// CAS-цикл гарантирует, что сохраняется максимальное значение:
+			// если другой воркер уже установил более позднюю паузу,
+			// мы не перезапишем её более ранней.
+			newPause := time.Now().Add(time.Duration(etmr.RetryAfter) * time.Second).UnixNano()
+			for {
+				old := pauseUntil.Load()
+				if old >= newPause {
+					break // уже установлена более поздняя пауза
+				}
+				if pauseUntil.CompareAndSwap(old, newPause) {
+					break
+				}
+			}
+
+			s.log.Info("превышен лимит запросов к accrual-системе, приостанавливаем всех воркеров",
+				zap.String("order", orderNumber),
+				zap.Int("retry_after_sec", etmr.RetryAfter))
+
+			s.requeueOrder(orderNumber, time.Duration(etmr.RetryAfter)*time.Second)
+			return
 		}
 
 		var enr *accrual.ErrNotRegistered
 		if errors.As(err, &enr) {
 			s.log.Debug("заказ не зарегистрирован в accrual-системе",
-				zap.String("заказ", orderNumber))
+				zap.String("order", orderNumber))
 			s.requeueOrder(orderNumber, s.config.AccrualRetryDelay)
-			return 0
+			return
 		}
 
 		s.log.Error("ошибка запроса к accrual-системе",
-			zap.String("заказ", orderNumber),
+			zap.String("order", orderNumber),
 			zap.Error(err))
 		s.requeueOrder(orderNumber, s.config.AccrualRetryDelay)
-		return 0
+		return
 	}
 
 	// Маппинг статусов accrual на внутренние
@@ -523,25 +592,22 @@ func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string) ti
 	// accrual-систему быстрее, чем мы можем записать результат в БД.
 	//
 	// При отмене контекста и при shutdown select разблокируется, воркер корректно
-	// завершится и закроет dbUpdateQueue. Обновление гарантированно доставляется
-	// в очередь или корректно отбрасывается при остановке сервиса (startup-sweep
-	// подхватит при рестарте).
+	// завершится. Обновление гарантированно доставляется в очередь или корректно
+	// отбрасывается при остановке сервиса (startup-sweep подхватит при рестарте).
 	select {
 	case s.dbUpdateQueue <- update:
 	case <-s.closed:
 		s.log.Info("сервис останавливается, обновление заказа не записано в БД",
-			zap.String("заказ", orderNumber))
+			zap.String("order", orderNumber))
 	case <-ctx.Done():
 		s.log.Info("контекст отменён, обновление заказа не записано в БД",
-			zap.String("заказ", orderNumber))
+			zap.String("order", orderNumber))
 	}
 
 	// Если статус нефинальный — переотправляем в accrual-очередь
 	if internalStatus == "PROCESSING" {
 		s.requeueOrder(orderNumber, s.config.AccrualRetryDelay)
 	}
-
-	return 0
 }
 
 // requeueOrder ставит заказ в очередь accrual после указанной задержки.
@@ -563,7 +629,7 @@ func (s *GopherMart) requeueOrder(orderNumber string, delay time.Duration) {
 // Это гарантирует порядок записи: обновления одного заказа не могут
 // прийти в БД в произвольном порядке. Если БД медленно отвечает,
 // основной цикл блокируется на flush — это создаёт естественный backpressure
-// для accrual-воркера (через переполнение dbUpdateQueue).
+// для accrual-воркеров (через переполнение dbUpdateQueue).
 //
 // Процессор завершается ТОЛЬКО при закрытии dbUpdateQueue (воркером),
 // после чего сбрасывает оставшийся батч. Использование отдельного контекста
