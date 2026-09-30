@@ -50,7 +50,7 @@ type OrderStore interface {
 	// от самых новых к самым старым по времени загрузки.
 	ListUserOrders(ctx context.Context, userID int64) ([]repository.Order, error)
 
-	// ListPendingOrderNumbers возвращает номера всех заказов в статусах
+	// ListPendingOrderNumbers возвращает номера заказов (до 500) в статусах
 	// NEW и PROCESSING, которые требуют опроса accrual-системы.
 	// Используется при запуске сервиса для восстановления очереди после перезапуска.
 	ListPendingOrderNumbers(ctx context.Context) ([]string, error)
@@ -63,7 +63,7 @@ type OrderStore interface {
 // WithdrawalStore — операции со списаниями: списание баллов и листинг.
 type WithdrawalStore interface {
 	// WithdrawPoints списывает баллы с баланса пользователя в счёт нового заказа orderNo.
-	// Выполняет в одной транзакции следущие операции:
+	// Выполняет в одной транзакции следующие операции:
 	// блокировка пользователя,
 	// проверка баланса,
 	// списание,
@@ -142,7 +142,7 @@ type ServiceConfig struct {
 	Logger               *zap.Logger   // логгер; если nil — используется no-op
 }
 
-// DefaultServiceConfig возвращает конфигурацию сервиса с значениями по умолчанию.
+// DefaultServiceConfig возвращает конфигурацию сервиса со значениями по умолчанию.
 // Storage и AccrualClient должны быть установлены вызывающим кодом.
 func DefaultServiceConfig() ServiceConfig {
 	return ServiceConfig{

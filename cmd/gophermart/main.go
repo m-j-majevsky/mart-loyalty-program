@@ -24,12 +24,12 @@ import (
 	"go.uber.org/zap"
 )
 
-// version — версия бинарника. Инъекцируется через -ldflags при сборке:
+// version — версия бинарника. Внедряется через -ldflags при сборке:
 // go build -ldflags "-X main.version=v1.0.0" -o bin/gophermart ./cmd/gophermart
 var version = "dev"
 
 // main — точка входа сервиса лояльности «Гофермарт».
-// Загружает конфигурацию, инициализирует логер, накатывает миграции,
+// Загружает конфигурацию, инициализирует логгер, накатывает миграции,
 // создаёт хранилище и сервис, запускает HTTP-сервер и фоновые воркеры,
 // корректно завершает работу по сигналу ОС.
 func main() {
@@ -178,7 +178,7 @@ func main() {
 // если подключение не удалось установить.
 //
 // Данная реализация предполагает, что конфиг соединения передается
-// в DSN-строке, например, с флагом "-d" командрой строки при запуске:
+// в DSN-строке, например, с флагом "-d" командной строки при запуске:
 // -d "postgres://gophermart:SECRET@localhost:30432/gophermart?sslmode=disable&pool_max_conns=10&pool_max_conn_lifetime=30m&pool_min_conns=2&pool_max_conn_idle_time=5m"
 func createPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	pool, err := pgxpool.New(ctx, dsn)

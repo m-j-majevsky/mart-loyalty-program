@@ -45,7 +45,7 @@ const procTimeout = 5 * time.Second
 
 // maxOrderNumberLen — ограничение на размер тела при загрузке номера заказа.
 // Номер заказа — короткая строка из цифр, большие тела отсекаются.
-// Значение синхронизировано с колонкой orders.number VARCHAR(32) в PostgreSQL:
+// Значение синхронизировано с колонкой orders.number VARCHAR(32) в PostgreSQL.
 const maxOrderNumberLen = 32
 
 // maxJSONBodyLen — ограничение на размер JSON-тела для хендлеров register, login,
