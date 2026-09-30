@@ -30,6 +30,8 @@
 
 «Гофермарт» — HTTP-сервис, реализующий накопительную систему лояльности. Пользователи регистрируются, загружают номера заказов, система опрашивает внешнюю accrual-систему для расчёта начислений и ведёт баланс баллов. Баллы можно списывать в счёт новых заказов.
 
+При старте сервис выполняет startup-sweep — выбирает до 500 незавершённых заказов (`NEW`, `PROCESSING`) из БД и ставит их в очередь на обработку. Периодический re-sweep не реализован — заказы, не попавшие в первую выборку, будут обработаны при следующем рестарте. Архитектура подробно описана в [ARCHITECTURE.md](ARCHITECTURE.md).
+
 ## Требования к окружению
 
 - **ОС:** Linux, WSL
@@ -147,10 +149,21 @@ postgres://gophermart:SECRET@localhost:5432/gophermart?sslmode=disable&pool_max_
 | `CookieAuthTTL` | 24 часа | Время жизни cookie аутентификации |
 | `ShutdownTimeout` | 10 секунд | Таймаут graceful shutdown HTTP-сервера |
 | `SigningKey` | `gophermart-signing-key` | Ключ JWT (если `SIGNING_KEY` не задан в env) |
+| `maxOrderNumberLen` | 32 | Максимальная длина номера заказа (синхронизировано с `VARCHAR(32)` в БД) |
+| `BcryptCost` | 12 | Стоимость bcrypt для хэширования паролей |
+| `AccrualQueueBuffer` | 2048 | Размер канала очереди запросов к accrual |
+| `AccrualWorkerCount` | 5 | Число воркеров для параллельного опроса accrual |
+| `DBUpdateQueueBuffer` | 512 | Размер канала очереди обновлений БД |
+| `DBUpdateBatchSize` | 128 | Максимальный размер батча обновления БД |
+| `DBUpdateFlushTimeout` | 200 мс | Период сброса батча в БД |
+| `AccrualPollInterval` | 100 мс | Задержка между запросами к accrual (per-worker) |
+| `AccrualRetryDelay` | 1 с | Задержка перед повторным опросом accrual о заказе в нефинальном статусе |
 
 ## Миграции базы данных
 
 Миграции SQL встроены в бинарник (`//go:embed *.sql`) и применяются автоматически при запуске сервиса — отдельной команды не требуется. Файлы миграций находятся в каталоге `migrations/`.
+
+Для защиты от одновременного запуска миграций из нескольких инстансов используется `pg_advisory_lock` на отдельном pinned-коннекте. После миграций сервис также берёт `pg_try_advisory_lock` с другим ключом — это **гарантирует, что одновременно работает только один инстанс** gophermart. Второй инстанс завершается с ошибкой. Подробности — в [ARCHITECTURE.md](ARCHITECTURE.md), раздел «Single-instance enforcement».
 
 Схема базы данных включает три таблицы:
 
@@ -202,7 +215,7 @@ go test -v -cover ./internal/repository
 | `internal/config` | 11 | не требуется (env-манипуляция) | testify assert |
 | `internal/logger` | 9 | `httptest` | testify assert |
 | `internal/service` | 49 | mockery-моки интерфейсов `Storage`, `AccrualClient` | suite + моки |
-| `internal/handler` | 69 | mockery-моки `GopherMartService` + `httptest` | suite + моки |
+| `internal/handler` | 69 (49 хендлеры + 20 middleware) | mockery-моки `GopherMartService` + `httptest` | testify assert/require |
 | `internal/accrual` | 33 | `httptest.Server` (мок HTTP) | testify assert/require |
 | **Итого** | **195** | | |
 
@@ -280,10 +293,10 @@ gophermart/
 │   │   └── main.go
 │   └── accrual/             # Эмулятор accrual-системы (бинарник)
 ├── internal/
-│   ├── accrual/             # HTTP-клиент accrual-системы (ретраи 5xx, 429)
+│   ├── accrual/             # HTTP-клиент accrual-системы (ретраи 5xx, 429, Retry-After)
 │   ├── auth/                # Генерация и валидация JWT
 │   ├── config/              # Загрузка конфигурации (env + флаги)
-│   ├── handler/            # HTTP-хендлеры и middleware
+│   ├── handler/            # HTTP-хендлеры, middleware, кастомные JSON-типы (jsonTime, jsonNumber)
 │   ├── logger/             # Инициализация zap-логгера
 │   ├── luhn/               # Проверка номера заказа по алгоритму Луна
 │   ├── repository/         # Слой хранилища (PostgreSQL через pgx)
