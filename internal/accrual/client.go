@@ -35,7 +35,7 @@ type Client struct {
 
 // NewClient создаёт HTTP-клиент для accrual-системы по адресу baseURL.
 // Использует таймаут 5 секунд на каждый HTTP-запрос.
-// log — логгер для диагностики (предупреждения о нестандартных заголовках и т.п.).
+// log — логгер для диагностики.
 func NewClient(baseURL string, log *zap.Logger) *Client {
 	if log == nil {
 		log = zap.NewNop()
