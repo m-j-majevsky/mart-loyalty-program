@@ -182,6 +182,9 @@ type GopherMart struct {
 
 // NewGopherMart создаёт экземпляр сервиса на основе конфигурации.
 // Возвращает ошибку, если не заданы хранилище или клиент accrual-системы.
+//
+// Валидация AccrualWorkerCount (минимум 1) выполняется в runAccrualWorkerPool —
+// непосредственно перед запуском пула воркеров.
 func NewGopherMart(cfg ServiceConfig) (*GopherMart, error) {
 	if cfg.Storage == nil {
 		return nil, fmt.Errorf("ошибка конфигурации: не задано хранилище")
@@ -194,12 +197,6 @@ func NewGopherMart(cfg ServiceConfig) (*GopherMart, error) {
 	log := cfg.Logger
 	if log == nil {
 		log = zap.NewNop()
-	}
-
-	// Гарантируем минимум 1 воркер.
-	workerCount := cfg.AccrualWorkerCount
-	if workerCount < 1 {
-		workerCount = 1
 	}
 
 	return &GopherMart{
@@ -445,7 +442,8 @@ func (s *GopherMart) runAccrualWorkerPool(ctx context.Context) {
 
 	// Общая пауза для всех воркеров: Unix-наносекунды, до которых
 	// отправка запросов к accrual-системе приостановлена.
-	// Значение 0 означает, что паузы нет.
+	// Значение 0 означает, что паузы нет. После истечения паузы
+	// значение сбрасывается в 0, чтобы избежать лишних проверок.
 	var pauseUntil atomic.Int64
 
 	var wg sync.WaitGroup
@@ -487,6 +485,10 @@ func (s *GopherMart) accrualWorkerLoop(ctx context.Context, workerID int, pauseU
 				case <-ctx.Done():
 					return
 				}
+			} else {
+				// Пауза истекла — сбрасываем в 0, чтобы при следующей
+				// итерации пропустить проверку.
+				pauseUntil.Store(0)
 			}
 		}
 
@@ -497,7 +499,7 @@ func (s *GopherMart) accrualWorkerLoop(ctx context.Context, workerID int, pauseU
 			return
 
 		case orderNumber := <-s.accrualQueue:
-			s.processOneOrder(ctx, orderNumber, pauseUntil)
+			s.processOneOrder(ctx, workerID, orderNumber, pauseUntil)
 
 			// Задержка между запросами к accrual-системе (per-worker).
 			// При 429 пауза устанавливается через pauseUntil и проверяется
@@ -521,7 +523,7 @@ func (s *GopherMart) accrualWorkerLoop(ctx context.Context, workerID int, pauseU
 // При получении 429 устанавливает pauseUntil в время now + Retry-After,
 // чтобы все воркеры приостановились. Если другой воркер уже установил
 // более позднюю паузу — сохраняется максимальное значение (через CAS-цикл).
-func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string, pauseUntil *atomic.Int64) {
+func (s *GopherMart) processOneOrder(ctx context.Context, workerID int, orderNumber string, pauseUntil *atomic.Int64) {
 	resp, err := s.config.AccrualClient.GetOrderAccrual(ctx, orderNumber)
 	if err != nil {
 		var etmr *accrual.ErrTooManyRequests
@@ -542,6 +544,7 @@ func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string, pa
 			}
 
 			s.log.Info("превышен лимит запросов к accrual-системе, приостанавливаем всех воркеров",
+				zap.Int("worker", workerID),
 				zap.String("order", orderNumber),
 				zap.Int("retry_after_sec", etmr.RetryAfter))
 
@@ -552,12 +555,14 @@ func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string, pa
 		var enr *accrual.ErrNotRegistered
 		if errors.As(err, &enr) {
 			s.log.Debug("заказ не зарегистрирован в accrual-системе",
+				zap.Int("worker", workerID),
 				zap.String("order", orderNumber))
 			s.requeueOrder(orderNumber, s.config.AccrualRetryDelay)
 			return
 		}
 
 		s.log.Error("ошибка запроса к accrual-системе",
+			zap.Int("worker", workerID),
 			zap.String("order", orderNumber),
 			zap.Error(err))
 		s.requeueOrder(orderNumber, s.config.AccrualRetryDelay)
@@ -598,9 +603,11 @@ func (s *GopherMart) processOneOrder(ctx context.Context, orderNumber string, pa
 	case s.dbUpdateQueue <- update:
 	case <-s.closed:
 		s.log.Info("сервис останавливается, обновление заказа не записано в БД",
+			zap.Int("worker", workerID),
 			zap.String("order", orderNumber))
 	case <-ctx.Done():
 		s.log.Info("контекст отменён, обновление заказа не записано в БД",
+			zap.Int("worker", workerID),
 			zap.String("order", orderNumber))
 	}
 
