@@ -13,7 +13,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
-// TestInitialize_ValidLevels — table-driven тест, проверяющий, что
+// TestInitialize_ValidLevels — тест, проверяющий, что
 // Initialize создаёт логгер для всех поддерживаемых уровней.
 func TestInitialize_ValidLevels(t *testing.T) {
 	levels := []string{"debug", "info", "warn", "error", "dpanic", "panic", "fatal"}

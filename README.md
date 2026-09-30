@@ -6,8 +6,9 @@
 
 - [Описание](#описание)
 - [Требования к окружению](#требования-к-окружению)
-- [Сборка](#сборка)
-- [Запуск](#запуск)
+- [Сборка и запуск](#сборка-и-запуск)
+  - [Команды Make](#команды-make)
+  - [Сборка вручную](#сборка-вручную)
   - [Запуск accrual-эмулятора](#запуск-accrual-эмулятора)
   - [Запуск сервиса gophermart](#запуск-сервиса-gophermart)
 - [Конфигурация](#конфигурация)
@@ -17,11 +18,12 @@
   - [Параметры, не задаваемые извне](#параметры-не-задаваемые-извне)
 - [Миграции базы данных](#миграции-базы-данных)
 - [Тестирование](#тестирование)
-  - [Подготовка](#подготовка)
-  - [Запуск](#запуск)
+  - [Команды Make для тестов](#команды-make-для-тестов)
+  - [Ручной запуск тестов](#ручной-запуск-тестов)
   - [Структура тестов](#структура-тестов)
   - [Мокирование БД (pgxmock)](#мокирование-бд-pgxmock)
   - [Моки интерфейсов (mockery)](#моки-интерфейсов-mockery)
+  - [Подсчёт покрытия](#подсчёт-покрытия)
 - [Структура проекта](#структура-проекта)
 
 ## Описание
@@ -30,19 +32,47 @@
 
 ## Требования к окружению
 
-- **ОС:** Linux, WLS
+- **ОС:** Linux, WSL
 - **Go:** 1.26+
 - **PostgreSQL:** 14+
+- **mockery:** v3 (для регенерации моков; `go install github.com/vektra/mockery/v3@latest`)
 
-## Сборка
+## Сборка и запуск
 
-Сборка сервиса:
+### Команды Make
+
+В корне проекта находится `Makefile` со следующими целями:
+
+| Команда | Описание |
+|---|---|
+| `make build` | Собрать бинарник в `./bin/gophermart` |
+| `make run` | Собрать и запустить (нужны env-переменные или флаги) |
+| `make test` | Запустить все тесты |
+| `make test-v` | Запустить все тесты с verbose-выводом |
+| `make test-pkg PKG=./internal/handler` | Запустить тесты конкретного пакета |
+| `make cover` | Итоговый процент покрытия (без моков, `cmd/`, `migrations/`) |
+| `make cover-html` | HTML-отчёт покрытия (без моков, `cmd/`, `migrations/`) |
+| `make mocks` | Сгенерировать моки через mockery |
+| `make tidy` | `go mod tidy` |
+| `make fmt` | Отформатировать код |
+| `make vet` | Статический анализ |
+| `make lint` | `fmt` + `vet` |
+| `make clean` | Удалить бинарник и файлы покрытия |
+| `make all` | `lint` + `build` + `test` |
+
+Быстрый старт — проверка кода, сборка и прогон тестов одной командой:
 
 ```bash
-go build -o ./cmd/gophermart/gophermart.o ./cmd/gophermart
+make all
 ```
 
-## Запуск
+### Сборка вручную
+
+Если `make` недоступен, бинарник собирается командой:
+
+```bash
+go build -o ./bin/gophermart ./cmd/gophermart
+```
 
 ### Запуск accrual-эмулятора
 
@@ -57,7 +87,7 @@ go build -o ./cmd/gophermart/gophermart.o ./cmd/gophermart
 ### Запуск сервиса gophermart
 
 ```bash
-./cmd/gophermart/gophermart.o -a :8080 -l debug -d "postgres://gophermart:SECRET@localhost:5432/gophermart?sslmode=disable" -r "http://localhost:8088"
+./bin/gophermart -a :8080 -l debug -d "postgres://gophermart:SECRET@localhost:5432/gophermart?sslmode=disable" -r "http://localhost:8088"
 ```
 
 ## Конфигурация
@@ -130,17 +160,25 @@ postgres://gophermart:SECRET@localhost:5432/gophermart?sslmode=disable&pool_max_
 
 ## Тестирование
 
-Проект покрыт юнит-тестами. Целевой уровень покрытия — не менее 60%. Тесты используют стандартный пакет `testing` совместно с библиотекой `testify` (`assert`, `require`, `suite`) и подход Table Driven Test для простых сценариев.
+Проект покрыт юнит-тестами — 195 тестов в 9 пакетах. Целевой уровень покрытия — не менее 60%. Тесты используют стандартный пакет `testing` совместно с библиотекой `testify` (`assert`, `require`, `suite`) и подход Table Driven Test для простых сценариев.
 
-### Подготовка
+### Команды Make для тестов
 
-Перед первым запуском тестов нужно загрузить зависимости тестовых модулей:
+```bash
+make test                                        # все тесты
+make test-v                                      # все тесты с verbose-выводом
+make test-pkg PKG=./internal/handler              # тесты одного пакета
+make cover                                       # итоговый процент покрытия
+make cover-html                                  # HTML-отчёт покрытия
+```
+
+### Ручной запуск тестов
+
+Перед первым запуском тестов:
 
 ```bash
 go mod tidy
 ```
-
-### Запуск
 
 Запуск всех тестов с покрытием:
 
@@ -156,16 +194,17 @@ go test -v -cover ./internal/repository
 
 ### Структура тестов
 
-| Пакет | Инструмент мокирования | Подход |
-|---|---|---|
-| `internal/repository` | `pgxmock/v4` — мок pgx-пула | Table-driven (suite), транзакции мокируются через `ExpectBegin`/`ExpectCommit`/`ExpectRollback` |
-| `internal/luhn` | не требуется (чистая функция) | Table-driven |
-| `internal/auth` | не требуется (чистая логика JWT) | testify assert/require |
-| `internal/config` | не требуется (env-манипуляция) | testify assert |
-| `internal/logger` | `httptest` | testify assert |
-| `internal/service` | mockery-моки интерфейсов `Storage`, `AccrualClient` | suite + моки |
-| `internal/handler` | mockery-моки `GopherMartService` + `httptest` | suite + моки |
-| `internal/accrual` | `httptest.Server` (мок HTTP) | testify assert/require |
+| Пакет | Тестов | Инструмент мокирования | Подход |
+|---|---|---|---|
+| `internal/repository` | 6 | `pgxmock/v4` — мок pgx-пула | Table-driven (suite), транзакции мокируются через `ExpectBegin`/`ExpectCommit`/`ExpectRollback` |
+| `internal/luhn` | 4 | не требуется (чистая функция) | Table-driven |
+| `internal/auth` | 14 | не требуется (чистая логика JWT) | testify assert/require |
+| `internal/config` | 11 | не требуется (env-манипуляция) | testify assert |
+| `internal/logger` | 9 | `httptest` | testify assert |
+| `internal/service` | 49 | mockery-моки интерфейсов `Storage`, `AccrualClient` | suite + моки |
+| `internal/handler` | 69 | mockery-моки `GopherMartService` + `httptest` | suite + моки |
+| `internal/accrual` | 33 | `httptest.Server` (мок HTTP) | testify assert/require |
+| **Итого** | **195** | | |
 
 ### Мокирование БД (pgxmock)
 
@@ -185,6 +224,12 @@ go install github.com/vektra/mockery/v3@latest
 
 ```bash
 mockery
+```
+
+или через Make:
+
+```bash
+make mocks
 ```
 
 Mockery v3 автоматически найдёт `.mockery.yaml` и сгенерирует моки для всех указанных интерфейсов. Сгенерированные файлы:
@@ -209,6 +254,23 @@ rm internal/service/mocks/mock_*.go internal/handler/mocks/mock_*.go
 mockery
 ```
 
+### Подсчёт покрытия
+
+Профиль покрытия собирается командой `go test -coverprofile`. Сгенерированные моки, точка входа `cmd/gophermart/main.go` и пакет `migrations/` исключаются из подсчёта, так как не являются тестируемым кодом:
+
+```bash
+go test -coverprofile=coverage.out ./...
+grep -v -e '/mocks/' -e '/cmd/gophermart/' -e '/migrations/' coverage.out > coverage_filtered.out
+go tool cover -func=coverage_filtered.out | tail -1
+```
+
+То же через Make:
+
+```bash
+make cover        # итоговый процент в терминале
+make cover-html   # HTML-отчёт в браузере
+```
+
 ## Структура проекта
 
 ```
@@ -229,5 +291,6 @@ gophermart/
 ├── migrations/             # SQL-миграции (embed в бинарник)
 ├── ARCHITECTURE.md         # Описание архитектуры
 ├── SPECIFICATION.md        # Техническое задание
+├── Makefile                # Команды сборки, тестирования, покрытия
 └── README.md               # Этот файл
 ```
