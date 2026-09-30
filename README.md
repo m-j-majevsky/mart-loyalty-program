@@ -17,6 +17,11 @@
   - [Параметры, не задаваемые извне](#параметры-не-задаваемые-извне)
 - [Миграции базы данных](#миграции-базы-данных)
 - [Тестирование](#тестирование)
+  - [Подготовка](#подготовка)
+  - [Запуск](#запуск)
+  - [Структура тестов](#структура-тестов)
+  - [Мокирование БД (pgxmock)](#мокирование-бд-pgxmock)
+  - [Моки интерфейсов (mockery)](#моки-интерфейсов-mockery)
 - [Структура проекта](#структура-проекта)
 
 ## Описание
@@ -125,7 +130,84 @@ postgres://gophermart:SECRET@localhost:5432/gophermart?sslmode=disable&pool_max_
 
 ## Тестирование
 
-Описание раздела будет добавлен позднее.
+Проект покрыт юнит-тестами. Целевой уровень покрытия — не менее 60%. Тесты используют стандартный пакет `testing` совместно с библиотекой `testify` (`assert`, `require`, `suite`) и подход Table Driven Test для простых сценариев.
+
+### Подготовка
+
+Перед первым запуском тестов нужно загрузить зависимости тестовых модулей:
+
+```bash
+go mod tidy
+```
+
+### Запуск
+
+Запуск всех тестов с покрытием:
+
+```bash
+go test -cover ./...
+```
+
+Запуск тестов отдельного пакета:
+
+```bash
+go test -v -cover ./internal/repository
+```
+
+### Структура тестов
+
+| Пакет | Инструмент мокирования | Подход |
+|---|---|---|
+| `internal/repository` | `pgxmock/v4` — мок pgx-пула | Table-driven (suite), транзакции мокируются через `ExpectBegin`/`ExpectCommit`/`ExpectRollback` |
+| `internal/luhn` | не требуется (чистая функция) | Table-driven |
+| `internal/auth` | не требуется (чистая логика JWT) | testify assert/require |
+| `internal/config` | не требуется (env-манипуляция) | testify assert |
+| `internal/logger` | `httptest` | testify assert |
+| `internal/service` | mockery-моки интерфейсов `Storage`, `AccrualClient` | suite + моки |
+| `internal/handler` | mockery-моки `GopherMartService` + `httptest` | suite + моки |
+| `internal/accrual` | `httptest.Server` (мок HTTP) | testify assert/require |
+
+### Мокирование БД (pgxmock)
+
+Для тестов слоя хранилища используется [pgxmock v4](https://github.com/pashagolub/pgxmock) — мок pgx, не требующий реального подключения к PostgreSQL. Каждый тест создаёт собственный экземпляр мока через `pgxmock.NewPool()` и проверяет, что все ожидания были удовлетворены, через `mock.ExpectationsWereMet()`.
+
+### Моки интерфейсов (mockery)
+
+Для мокирования интерфейсов сервисного и хендлерного слоёв используется [mockery v3](https://vektra.github.io/mockery/). Конфигурация генерации хранится в файле `.mockery.yaml` в корне проекта. Моки генерируются в каталог `mocks/` рядом с тестируемым пакетом.
+
+Установка mockery v3:
+
+```bash
+go install github.com/vektra/mockery/v3@latest
+```
+
+Генерация всех моков одной командой из корня проекта:
+
+```bash
+mockery
+```
+
+Mockery v3 автоматически найдёт `.mockery.yaml` и сгенерирует моки для всех указанных интерфейсов. Сгенерированные файлы:
+
+| Файл | Интерфейс | Пакет |
+|---|---|---|
+| `internal/service/mocks/mock_Storage.go` | `Storage` | `mocks` |
+| `internal/service/mocks/mock_AccrualClient.go` | `AccrualClient` | `mocks` |
+| `internal/handler/mocks/mock_GopherMartService.go` | `GopherMartService` | `mocks` |
+
+Моки используют стиль `EXPECT()`:
+
+```go
+storage.EXPECT().CreateUser(mock.Anything, "alice", mock.AnythingOfType("string")).
+    Return(int64(42), nil)
+```
+
+При изменении интерфейсов удалите старые моки и перегенерируйте:
+
+```bash
+rm internal/service/mocks/mock_*.go internal/handler/mocks/mock_*.go
+mockery
+```
 
 ## Структура проекта
 

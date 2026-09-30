@@ -1,0 +1,20 @@
+template: testify
+formatter: goimports
+packages:
+  github.com/m-j-majevsky/gophermart/internal/service:
+    interfaces:
+      Storage:
+      AccrualClient:
+    config:
+      dir: "{{.InterfaceDir}}/mocks"
+      filename: "mock_{{.InterfaceName}}.go"
+      pkgname: mocks
+      structname: "Mock{{.InterfaceName}}"
+  github.com/m-j-majevsky/gophermart/internal/handler:
+    interfaces:
+      GopherMartService:
+    config:
+      dir: "{{.InterfaceDir}}/mocks"
+      filename: "mock_{{.InterfaceName}}.go"
+      pkgname: mocks
+      structname: "Mock{{.InterfaceName}}"
