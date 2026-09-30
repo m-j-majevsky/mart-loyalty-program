@@ -31,6 +31,7 @@ type compressWriter struct {
 	w           http.ResponseWriter
 	zw          *gzip.Writer
 	wroteHeader bool
+	skipGzip    bool // true для статус-кодов без тела (204, 304) — не пишем gzip-футер
 }
 
 // newCompressWriter создаёт compressWriter, оборачивающий исходный ResponseWriter.
@@ -55,6 +56,8 @@ func (c *compressWriter) Write(p []byte) (int, error) {
 // WriteHeader устанавливает заголовок Content-Encoding: gzip для всех
 // статус-кодов, кроме 204 (No Content) и 304 (Not Modified),
 // у которых нет тела ответа.
+// Для этих кодов также устанавливается флаг skipGzip,
+// чтобы Close не писал gzip-футер в пустой ответ.
 func (c *compressWriter) WriteHeader(statusCode int) {
 	if c.wroteHeader {
 		return
@@ -63,13 +66,20 @@ func (c *compressWriter) WriteHeader(statusCode int) {
 
 	if statusCode != http.StatusNoContent && statusCode != http.StatusNotModified {
 		c.w.Header().Set("Content-Encoding", "gzip")
+	} else {
+		c.skipGzip = true
 	}
 
 	c.w.WriteHeader(statusCode)
 }
 
 // Close закрывает gzip.Writer и досылает все данные из буфера.
+// Для статус-кодов без тела (204, 304) gzip-футер не пишется,
+// чтобы не добавлять лишние байты в ответ, где тела быть не должно.
 func (c *compressWriter) Close() error {
+	if c.skipGzip {
+		return nil
+	}
 	return c.zw.Close()
 }
 

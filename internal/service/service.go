@@ -580,6 +580,10 @@ func (s *GopherMart) processOneOrder(ctx context.Context, workerID int, orderNum
 		internalStatus = "PROCESSING"
 	default:
 		internalStatus = "PROCESSING"
+		s.log.Warn("неизвестный статус от accrual-системы, трактуем как PROCESSING",
+			zap.Int("worker", workerID),
+			zap.String("order", orderNumber),
+			zap.String("status", resp.Status))
 	}
 
 	update := repository.OrderUpdate{
@@ -628,6 +632,9 @@ func (s *GopherMart) requeueOrder(orderNumber string, delay time.Duration) {
 	})
 }
 
+// flushTimeout — таймаут на запись батча в БД при сбросе.
+const flushTimeout = 10 * time.Second
+
 // runBatchProcessor читает обновления из dbUpdateQueue, накапливает их в батч
 // и пакетно записывает в БД при достижении DBUpdateBatchSize или по таймеру
 // DBUpdateFlushTimeout.
@@ -648,7 +655,7 @@ func (s *GopherMart) runBatchProcessor() {
 	defer ticker.Stop()
 
 	// flush сбрасывает накопленный батч в БД синхронно.
-	// Использует свежий контекст с таймаутом 10 секунд — это гарантирует,
+	// Использует свежий контекст с таймаутом flushTimeout — это гарантирует,
 	// что финальный flush при остановке сработает даже если основной
 	// контекст сервиса уже отменён.
 	flush := func() {
@@ -659,7 +666,7 @@ func (s *GopherMart) runBatchProcessor() {
 		copy(batchToStore, batch)
 		batch = batch[:0]
 
-		flushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		flushCtx, cancel := context.WithTimeout(context.Background(), flushTimeout)
 		defer cancel()
 		if err := s.config.Storage.BatchUpdateOrders(flushCtx, batchToStore); err != nil {
 			s.log.Error("ошибка пакетного обновления заказов", zap.Error(err))

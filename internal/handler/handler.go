@@ -472,6 +472,10 @@ func (rt *Router) withdraw(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Код 422 используется здесь расширительно:
+		// спецификация описывает 422 как "неверный номер заказа",
+		// но 409 (Conflict) отсутствует в списке допустимых
+		// кодов для этого эндпоинта.
 		if errors.Is(err, service.ErrOrderAlreadyExists) {
 			http.Error(w, "номер заказа уже использован", http.StatusUnprocessableEntity)
 			return

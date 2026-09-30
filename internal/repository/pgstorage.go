@@ -179,6 +179,8 @@ func (s *pgStorage) WithdrawPoints(ctx context.Context, userID int64, orderNo st
 	}
 
 	// Шаг 2: условный UPDATE — проверяем баланс и списываем одновременно
+	// newBalance используется только для обнаружения нехватки баланса через ErrNoRows;
+	// само значение далее не читается.
 	var newBalance decimal.Decimal
 	err = tx.QueryRow(ctx, `
 		UPDATE users
@@ -271,7 +273,7 @@ func (s *pgStorage) ListPendingOrderNumbers(ctx context.Context) ([]string, erro
 // начисляет баллы на баланс пользователя — владельца заказа.
 // Вся операция выполняется в одной транзакции.
 //
-// Запросы выполняются без прекомпиляции, поскольку для коротких батчей (до 512 элементов)
+// Запросы выполняются без прекомпиляции, поскольку для коротких батчей (до 128 элементов)
 // overhead от Prepare может превысить выгоду от повторного использования подготовленного запроса.
 func (s *pgStorage) BatchUpdateOrders(ctx context.Context, updates []OrderUpdate) error {
 	if len(updates) == 0 {
