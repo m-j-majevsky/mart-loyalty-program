@@ -2,6 +2,34 @@
 
 Документ описывает архитектуру решения: слоистую структуру, схему базы данных, HTTP-хендлеры, канальную обработку начислений и логирование.
 
+## Содержание
+
+- [Слоистая архитектура](#слоистая-архитектура)
+- [Логирование](#логирование)
+- [Схема базы данных](#схема-базы-данных)
+  - [Тип `order_status`](#тип-order_status)
+  - [Таблица `users`](#таблица-users)
+  - [Таблица `orders`](#таблица-orders)
+  - [Таблица `withdrawals`](#таблица-withdrawals)
+  - [Транзакция списания `WithdrawPoints`](#транзакция-списания-withdrawpoints)
+- [HTTP-хендлеры](#http-хендлеры)
+  - [`POST /api/user/register` — регистрация пользователя](#post-apiuserregister-регистрация-пользователя)
+  - [`POST /api/user/login` — аутентификация пользователя](#post-apiuserlogin-аутентификация-пользователя)
+  - [`POST /api/user/orders` — загрузка номера заказа](#post-apiuserorders-загрузка-номера-заказа)
+  - [`GET /api/user/orders` — список заказов](#get-apiuserorders-список-заказов)
+  - [`GET /api/user/balance` — текущий баланс](#get-apiuserbalance-текущий-баланс)
+  - [`POST /api/user/balance/withdraw` — списание баллов](#post-apiuserbalancewithdraw-списание-баллов)
+  - [`GET /api/user/withdrawals` — список списаний](#get-apiuserwithdrawals-список-списаний)
+  - [`GET /ping` — проверка БД](#get-ping-проверка-бд)
+- [Канальная архитектура](#канальная-архитектура)
+  - [Обзор](#обзор)
+  - [`accrualQueue` — очередь запросов к accrual-системе](#accrualqueue-очередь-запросов-к-accrual-системе)
+  - [Worker Pool](#worker-pool)
+  - [`dbUpdateQueue` — очередь обновлений БД](#dbupdatequeue-очередь-обновлений-бд)
+  - [Batch Processor](#batch-processor)
+  - [Graceful shutdown](#graceful-shutdown)
+  - [Startup-sweep](#startup-sweep)
+
 ---
 
 ## Слоистая архитектура
