@@ -445,8 +445,8 @@ func (_c *MockStorage_GetUserByLogin_Call) RunAndReturn(run func(ctx context.Con
 }
 
 // ListPendingOrderNumbers provides a mock function for the type MockStorage
-func (_mock *MockStorage) ListPendingOrderNumbers(ctx context.Context) ([]string, error) {
-	ret := _mock.Called(ctx)
+func (_mock *MockStorage) ListPendingOrderNumbers(ctx context.Context, limit int) ([]string, error) {
+	ret := _mock.Called(ctx, limit)
 
 	if len(ret) == 0 {
 		panic("no return value specified for ListPendingOrderNumbers")
@@ -454,18 +454,18 @@ func (_mock *MockStorage) ListPendingOrderNumbers(ctx context.Context) ([]string
 
 	var r0 []string
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context) ([]string, error)); ok {
-		return returnFunc(ctx)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int) ([]string, error)); ok {
+		return returnFunc(ctx, limit)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context) []string); ok {
-		r0 = returnFunc(ctx)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, int) []string); ok {
+		r0 = returnFunc(ctx, limit)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).([]string)
 		}
 	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context) error); ok {
-		r1 = returnFunc(ctx)
+	if returnFunc, ok := ret.Get(1).(func(context.Context, int) error); ok {
+		r1 = returnFunc(ctx, limit)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -479,18 +479,24 @@ type MockStorage_ListPendingOrderNumbers_Call struct {
 
 // ListPendingOrderNumbers is a helper method to define mock.On call
 //   - ctx context.Context
-func (_e *MockStorage_Expecter) ListPendingOrderNumbers(ctx any) *MockStorage_ListPendingOrderNumbers_Call {
-	return &MockStorage_ListPendingOrderNumbers_Call{Call: _e.mock.On("ListPendingOrderNumbers", ctx)}
+//   - limit int
+func (_e *MockStorage_Expecter) ListPendingOrderNumbers(ctx any, limit any) *MockStorage_ListPendingOrderNumbers_Call {
+	return &MockStorage_ListPendingOrderNumbers_Call{Call: _e.mock.On("ListPendingOrderNumbers", ctx, limit)}
 }
 
-func (_c *MockStorage_ListPendingOrderNumbers_Call) Run(run func(ctx context.Context)) *MockStorage_ListPendingOrderNumbers_Call {
+func (_c *MockStorage_ListPendingOrderNumbers_Call) Run(run func(ctx context.Context, limit int)) *MockStorage_ListPendingOrderNumbers_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
 			arg0 = args[0].(context.Context)
 		}
+		var arg1 int
+		if args[1] != nil {
+			arg1 = args[1].(int)
+		}
 		run(
 			arg0,
+			arg1,
 		)
 	})
 	return _c
@@ -501,7 +507,7 @@ func (_c *MockStorage_ListPendingOrderNumbers_Call) Return(strings []string, err
 	return _c
 }
 
-func (_c *MockStorage_ListPendingOrderNumbers_Call) RunAndReturn(run func(ctx context.Context) ([]string, error)) *MockStorage_ListPendingOrderNumbers_Call {
+func (_c *MockStorage_ListPendingOrderNumbers_Call) RunAndReturn(run func(ctx context.Context, limit int) ([]string, error)) *MockStorage_ListPendingOrderNumbers_Call {
 	_c.Call.Return(run)
 	return _c
 }

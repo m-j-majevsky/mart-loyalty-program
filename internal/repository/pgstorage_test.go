@@ -701,12 +701,13 @@ func (s *PgStorageTestSuite) TestListPendingOrderNumbers_SuccessWithData() {
 	mock, storage := s.newMockStorage()
 
 	mock.ExpectQuery("SELECT number FROM orders WHERE status IN").
+		WithArgs(500).
 		WillReturnRows(pgxmock.NewRows([]string{"number"}).
 			AddRow("123").
 			AddRow("456").
 			AddRow("789"))
 
-	numbers, err := storage.ListPendingOrderNumbers(context.Background())
+	numbers, err := storage.ListPendingOrderNumbers(context.Background(), 500)
 
 	s.Require().NoError(err)
 	s.Assert().Len(numbers, 3)
@@ -721,9 +722,10 @@ func (s *PgStorageTestSuite) TestListPendingOrderNumbers_EmptyResult() {
 	mock, storage := s.newMockStorage()
 
 	mock.ExpectQuery("SELECT number FROM orders WHERE status IN").
+		WithArgs(500).
 		WillReturnRows(pgxmock.NewRows([]string{"number"}))
 
-	numbers, err := storage.ListPendingOrderNumbers(context.Background())
+	numbers, err := storage.ListPendingOrderNumbers(context.Background(), 500)
 
 	s.Require().NoError(err)
 	s.Assert().Empty(numbers)
@@ -735,9 +737,10 @@ func (s *PgStorageTestSuite) TestListPendingOrderNumbers_QueryError() {
 	mock, storage := s.newMockStorage()
 
 	mock.ExpectQuery("SELECT number FROM orders WHERE status IN").
+		WithArgs(500).
 		WillReturnError(errors.New("connection refused"))
 
-	numbers, err := storage.ListPendingOrderNumbers(context.Background())
+	numbers, err := storage.ListPendingOrderNumbers(context.Background(), 500)
 
 	s.Assert().Error(err)
 	s.Assert().Nil(numbers)

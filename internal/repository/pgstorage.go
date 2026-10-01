@@ -248,17 +248,17 @@ func (s *pgStorage) ListWithdrawals(ctx context.Context, userID int64) ([]Withdr
 	return withdrawals, nil
 }
 
-// ListPendingOrderNumbers возвращает номера всех заказов в статусах
+// ListPendingOrderNumbers возвращает номера заказов в статусах
 // NEW и PROCESSING, которые требуют опроса accrual-системы.
 // Используется при запуске сервиса для восстановления очереди после перезапуска.
 //
-// LIMIT 500 ограничивает выборку, чтобы не загрузить миллионы строк в память
-// при большом количестве незавершённых заказов. Остальные будут обработаны
-// при следующем рестарте или при добавлении периодического re-sweep.
-func (s *pgStorage) ListPendingOrderNumbers(ctx context.Context) ([]string, error) {
-	const q = `SELECT number FROM orders WHERE status IN ('NEW', 'PROCESSING') LIMIT 500`
+// Параметр limit ограничивает размер выборки, чтобы не загрузить миллионы
+// строк в память при большом количестве незавершённых заказов. Остальные
+// будут обработаны при следующем рестарте или при добавлении периодического re-sweep.
+func (s *pgStorage) ListPendingOrderNumbers(ctx context.Context, limit int) ([]string, error) {
+	const q = `SELECT number FROM orders WHERE status IN ('NEW', 'PROCESSING') LIMIT $1`
 
-	rows, err := s.db.Query(ctx, q)
+	rows, err := s.db.Query(ctx, q, limit)
 	if err != nil {
 		return nil, fmt.Errorf("ошибка запроса незавершённых заказов: %w", err)
 	}

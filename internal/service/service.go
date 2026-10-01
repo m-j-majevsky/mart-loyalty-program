@@ -50,10 +50,11 @@ type OrderStore interface {
 	// от самых новых к самым старым по времени загрузки.
 	ListUserOrders(ctx context.Context, userID int64) ([]repository.Order, error)
 
-	// ListPendingOrderNumbers возвращает номера заказов (до 500) в статусах
+	// ListPendingOrderNumbers возвращает номера заказов в статусах
 	// NEW и PROCESSING, которые требуют опроса accrual-системы.
+	// Параметр limit ограничивает размер выборки.
 	// Используется при запуске сервиса для восстановления очереди после перезапуска.
-	ListPendingOrderNumbers(ctx context.Context) ([]string, error)
+	ListPendingOrderNumbers(ctx context.Context, limit int) ([]string, error)
 
 	// BatchUpdateOrders пакетно обновляет статусы и начисления для списка заказов.
 	// Для каждого заказа со статусом PROCESSED начисляет баллы на баланс пользователя.
@@ -343,11 +344,15 @@ func (s *GopherMart) GetOrderByNumber(ctx context.Context, number string) (int64
 	return s.config.Storage.GetOrderByNumber(ctx, number)
 }
 
-// EnqueuePendingOrders выбирает из БД все заказы в статусах NEW и PROCESSING
-// и ставит их в очередь на опрос accrual-системы. Вызывается при запуске сервиса
-// для восстановления обработки после перезапуска.
+// EnqueuePendingOrders выбирает из БД заказы в статусах NEW и PROCESSING
+// и ставит их в очередь на опрос accrual-системы.
+// Объем выборки не превышает половины размера accrualQueue.
+// Вызывается при запуске сервиса для восстановления обработки после перезапуска.
 func (s *GopherMart) EnqueuePendingOrders(ctx context.Context) error {
-	numbers, err := s.config.Storage.ListPendingOrderNumbers(ctx)
+	// Ограничиваем выборку до половины размера accrualQueue:
+	// нет смысла загружать больше заказов, чем может вместить очередь.
+	limit := s.config.AccrualQueueBuffer / 2
+	numbers, err := s.config.Storage.ListPendingOrderNumbers(ctx, limit)
 	if err != nil {
 		return fmt.Errorf("ошибка получения незавершённых заказов: %w", err)
 	}

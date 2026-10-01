@@ -437,7 +437,7 @@ func TestPing_Fail(t *testing.T) {
 func TestEnqueuePendingOrders_Success(t *testing.T) {
 	// Незавершённые заказы найдены — все ставятся в очередь.
 	svc, storage, _ := newTestService(t)
-	storage.EXPECT().ListPendingOrderNumbers(mock.Anything).
+	storage.EXPECT().ListPendingOrderNumbers(mock.Anything, svc.config.AccrualQueueBuffer/2).
 		Return([]string{"111", "222", "333"}, nil)
 	err := svc.EnqueuePendingOrders(context.Background())
 	require.NoError(t, err)
@@ -455,7 +455,7 @@ func TestEnqueuePendingOrders_Success(t *testing.T) {
 func TestEnqueuePendingOrders_DBError(t *testing.T) {
 	// Ошибка БД при получении списка — сервис возвращает ошибку.
 	svc, storage, _ := newTestService(t)
-	storage.EXPECT().ListPendingOrderNumbers(mock.Anything).
+	storage.EXPECT().ListPendingOrderNumbers(mock.Anything, svc.config.AccrualQueueBuffer/2).
 		Return(nil, errors.New("db error"))
 	err := svc.EnqueuePendingOrders(context.Background())
 	require.Error(t, err)
