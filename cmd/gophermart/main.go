@@ -61,11 +61,6 @@ func main() {
 	}
 	defer pool.Close()
 
-	// Накатываем миграции (до создания хранилища)
-	if err := migrations.RunMigrations(cfg.DatabaseURI); err != nil {
-		mainLogger.Fatal("ошибка выполнения миграций", zap.Error(err))
-	}
-
 	// Запрещаем параллельный запуск второго инстанса.
 	// pg_try_advisory_lock — session-level: держится, пока жив коннект.
 	// При падении процесса коннект рвётся, PostgreSQL автоматически снимает lock.
@@ -90,6 +85,12 @@ func main() {
 		lockConn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", instanceLockKey)
 		lockConn.Release()
 	}()
+
+	// Накатываем миграции (до создания хранилища, но после захвата instance lock,
+	// чтобы исключить параллельный запуск миграций из второго инстанса)
+	if err := migrations.RunMigrations(cfg.DatabaseURI); err != nil {
+		mainLogger.Fatal("ошибка выполнения миграций", zap.Error(err))
+	}
 
 	// Создаём хранилище
 	storage := repository.NewPgStorage(pool)
