@@ -1,7 +1,9 @@
 # Binaries for programs and plugins
+bin/*
 *.exe
 *.exe~
 *.dll
+*.o
 *.so
 *.dylib
 
@@ -21,3 +23,7 @@ vendor/
 # IDEs directories
 .idea
 .vscode
+
+# The rest
+test_gophermart.sh
+test_gophermart_out.txt
