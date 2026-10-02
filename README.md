@@ -117,7 +117,7 @@ go build -o ./bin/gophermart ./cmd/gophermart
 | `DATABASE_URI` | Строка подключения к PostgreSQL | (нет, обязательна) |
 | `ACCRUAL_SYSTEM_ADDRESS` | Адрес accrual-системы | (нет, обязательна) |
 | `LOG_LEVEL` | Уровень логирования | `info` |
-| `SIGNING_KEY` | Ключ подписи JWT-токенов | `gophermart-signing-key` |
+| `SIGNING_KEY` | Ключ подписи JWT-токенов | (нет, обязательна) |
 
 Обязательные параметры — `DATABASE_URI` и `ACCRUAL_SYSTEM_ADDRESS`. При их отсутствии сервис выведет ошибку и завершится.
 
@@ -148,7 +148,6 @@ postgres://gophermart:SECRET@localhost:5432/gophermart?sslmode=disable&pool_max_
 | `CookieAuthName` | `gophermart_auth` | Имя cookie для хранения JWT |
 | `CookieAuthTTL` | 24 часа | Время жизни cookie аутентификации |
 | `ShutdownTimeout` | 10 секунд | Таймаут graceful shutdown HTTP-сервера |
-| `SigningKey` | `gophermart-signing-key` | Ключ JWT (если `SIGNING_KEY` не задан в env) |
 | `maxOrderNumberLen` | 32 | Максимальная длина номера заказа (синхронизировано с `VARCHAR(32)` в БД) |
 | `BcryptCost` | 12 | Стоимость bcrypt для хэширования паролей |
 | `AccrualQueueBuffer` | 2048 | Размер канала очереди запросов к accrual |

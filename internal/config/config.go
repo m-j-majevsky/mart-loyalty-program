@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -78,6 +79,7 @@ func readApplicationConfig() ApplicationConfig {
 	envRunAddress := envOr("RUN_ADDRESS", defaultRunAddress)
 	envDatabaseURI := envOr("DATABASE_URI", "")
 	envAccrualSystemAddress := envOr("ACCRUAL_SYSTEM_ADDRESS", "")
+	envSigningKey := envOr("SIGNING_KEY", "")
 
 	// Шаг 3: флаги командной строки перекрывают переменные окружения.
 	// Значения из env передаём как defaults: если флаг не задан явно,
@@ -88,13 +90,9 @@ func readApplicationConfig() ApplicationConfig {
 	flag.StringVar(&cfg.LogLevel, "l", envLogLevel, "уровень логирования")
 	flag.Parse()
 
-	// Ключ подписи JWT: из env или значение по умолчанию.
+	// Ключ подписи JWT: из env или пустой срез.
 	// Не параметризуется флагом командной строки.
-	if v, ok := os.LookupEnv("SIGNING_KEY"); ok {
-		cfg.SigningKey = []byte(v)
-	} else {
-		cfg.SigningKey = []byte("gophermart-signing-key")
-	}
+	cfg.SigningKey = []byte(envSigningKey)
 
 	// Значения по умолчанию, не параметризуемые извне
 	cfg.CookieAuthName = "gophermart_auth"
@@ -103,6 +101,10 @@ func readApplicationConfig() ApplicationConfig {
 
 	return cfg
 }
+
+// sentinel-значение вводится для обработки отсутствия переменной окружения
+// в тестах (GitHub Actions) платформы Практикума Яндекс.
+var ErrEmptySigningKey = errors.New("SIGNING_KEY не задан (используйте переменную окружения SIGNING_KEY)")
 
 // validateApplicationConfig — слой валидации: проверяет, что обязательные
 // параметры заданы и непусты. Возвращает конфигурацию без изменений
@@ -121,7 +123,7 @@ func validateApplicationConfig(cfg ApplicationConfig) (ApplicationConfig, error)
 		return cfg, fmt.Errorf("LOG_LEVEL не задан (используйте флаг -l или переменную окружения LOG_LEVEL)")
 	}
 	if len(cfg.SigningKey) == 0 {
-		return cfg, fmt.Errorf("SIGNING_KEY не задан (используйте переменную окружения SIGNING_KEY)")
+		return cfg, ErrEmptySigningKey
 	}
 
 	return cfg, nil
